@@ -286,6 +286,62 @@ export class QuestionFlow {
     this.send.toRole(session.id, 'interviewer', { type: 'notes_updated', sessionId: session.id, questionId: q.questionId, text });
   }
 
+  // --- Transcript correction + re-evaluation (interviewer/owner only) ---
+
+  handleAnswerEdit(client: QuestionFlowClient, msg: Record<string, unknown>): void {
+    const session = this.interviewerSession(client);
+    const q = this.findQuestion(session, msg.questionId, client);
+    if (!session || !q) return;
+    const result = this.editAnswer(session, q, msg.text);
+    if (result !== true) this.error(client, 'invalid_edit', result);
+  }
+
+  handleReevaluate(client: QuestionFlowClient, msg: Record<string, unknown>): void {
+    const session = this.interviewerSession(client);
+    const q = this.findQuestion(session, msg.questionId, client);
+    if (!session || !q) return;
+    const result = this.reevaluate(session, q);
+    if (result !== true) this.error(client, 'invalid_state', result);
+  }
+
+  /**
+   * Stores an interviewer correction of the candidate's answer (the original
+   * STT text is kept). `text: null` reverts to the original. Returns true or
+   * a user-facing reason it was refused.
+   */
+  editAnswer(session: InterviewSession, q: InterviewQuestion, text: unknown): true | string {
+    if (q.questionId === session.currentQuestionId) return 'End the question before editing its answer.';
+    if (text === null) {
+      q.editedAnswer = null;
+      q.editedBy = null;
+      q.editedAt = null;
+    } else {
+      const clean = typeof text === 'string' ? text.replace(/[\u0000-\u0008\u000B-\u001F\u007F]/g, '').trim() : '';
+      if (!clean) return 'The corrected answer cannot be empty.';
+      if (clean.length > MAX_ANSWER_LENGTH) return `The answer can be up to ${MAX_ANSWER_LENGTH} characters.`;
+      q.editedAnswer = clean;
+      q.editedBy = session.details.interviewerName;
+      q.editedAt = Date.now();
+    }
+    console.log(`[QUESTION] ${q.questionId} answer ${q.editedAnswer === null ? 'reverted to original' : 'edited'}`);
+    this.send.toRole(session.id, 'interviewer', { type: 'evaluation_updated', sessionId: session.id, question: q });
+    return true;
+  }
+
+  /** Runs a new evaluation on the current (possibly edited) answer; adds a history row. */
+  reevaluate(session: InterviewSession, q: InterviewQuestion): true | string {
+    if (q.questionId === session.currentQuestionId) return 'End the question before re-evaluating it.';
+    if (q.status === 'evaluating') return 'An evaluation is already running for this question.';
+    if (!(q.editedAnswer ?? q.answer).trim()) return 'There is no answer to evaluate.';
+    this.trackEvaluation(session, q, 'reevaluate');
+    return true;
+  }
+
+  /** Resolves when the given question's running evaluation finishes. */
+  async waitForQuestion(sessionId: string): Promise<void> {
+    await this.waitForEvaluations(sessionId);
+  }
+
   /** Interviewer setting: auto-end the answer after candidate silence (default off). */
   handleSettings(client: QuestionFlowClient, msg: Record<string, unknown>): void {
     const session = this.interviewerSession(client);

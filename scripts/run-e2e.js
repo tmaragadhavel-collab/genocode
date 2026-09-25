@@ -93,6 +93,7 @@ async function suite(name, file, ...args) {
   await suite('chat', 'chat.e2e.js');
   await suite('speech-to-text', 'stt.e2e.js', `http://127.0.0.1:${whisperPort}/control`);
   await suite('answer boundaries', 'boundaries.e2e.js', `http://127.0.0.1:${whisperPort}/control`);
+  await suite('transcript correction', 'corrections.e2e.js', `http://127.0.0.1:${whisperPort}/control`);
   await suite('restore (before crash)', 'restore.e2e.js', 'before', state('restore'));
   await killServer();
 

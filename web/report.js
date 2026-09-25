@@ -120,7 +120,7 @@ function render() {
       h('td', {}, qr.questionText, qr.skills.length ? h('div', { className: 'small muted' }, qr.skills.join(', ')) : null),
       h('td', { style: 'width:30%' }, score === null ? null : bar(score)),
       h('td', { className: 'num', style: 'white-space:nowrap' },
-        score === null ? h('span', { className: 'muted' }, { no_answer: 'No answer', error: 'Not evaluated', evaluating: 'Not evaluated' }[qr.status] || '—') : `${score}${qr.overridden ? '*' : ''}`),
+        score === null ? h('span', { className: 'muted' }, { no_answer: 'No answer', error: 'Not evaluated', evaluating: 'Not evaluated' }[qr.status] || '—') : `${score}${qr.overridden ? '*' : ''}${q?.lowConfidence ? ' ⚠' : ''}`),
       h('td', { className: 'muted small' }, qr.overridden ? `AI ${qr.aiScore}` : ''));
     function toggle() {
       detailRow.hidden = !detailRow.hidden;
@@ -134,7 +134,7 @@ function render() {
       ? h('div', { style: 'overflow-x:auto' }, h('table', { className: 'table' },
         h('thead', {}, h('tr', {}, h('th', {}, '#'), h('th', {}, 'Question'), h('th', {}, 'Score by question'), h('th', {}, 'Score'), h('th', {}, ''))), tbody))
       : h('p', { className: 'muted' }, 'No questions were asked.'),
-    h('p', { className: 'small muted' }, '* adjusted by the interviewer. Click a question for the answer, breakdown and feedback.'));
+    h('p', { className: 'small muted' }, '* adjusted by the interviewer · ⚠ answer includes low-confidence transcription. Click a question for the answer, breakdown, feedback and corrections.'));
 
   // --- Skills & AI findings ---
   const skills = h('section', { className: 'card stack' },
@@ -199,15 +199,52 @@ function render() {
   app.replaceChildren(h('div', { className: 'stack' }, hero, stats, disclaimer, questions, skills, findings, summary, review, notesCard, transcript));
 }
 
+async function post(url, statusEl) {
+  statusEl.textContent = 'Starting…';
+  try {
+    const resp = await fetch(url, { method: 'POST' });
+    const body = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(body.error || 'Could not start.');
+    return true;
+  } catch (err) {
+    statusEl.textContent = err.message === 'Failed to fetch' ? 'Could not reach the server. Try again.' : err.message;
+    return false;
+  }
+}
+
 function questionDetail(q) {
   const e = q.evaluation;
+  const base = `/api/interviews/${sessionId}/questions/${q.questionId}`;
+  const answerStatus = h('span', { className: 'saved' });
+  const answerBox = h('textarea', { rows: '4', maxlength: '8000', 'aria-label': 'Candidate answer text' }, q.editedAnswer ?? q.answer ?? '');
   const noteStatus = h('span', { className: 'saved' });
   const note = h('textarea', { rows: '2', maxlength: '4000', placeholder: 'Private note for this question' }, q.interviewerNote || '');
   return h('div', { className: 'detail' },
     h('div', { className: 'full' }, h('h3', {}, 'Question'), h('p', {}, q.questionText)),
-    h('div', { className: 'full' }, h('h3', {}, 'Candidate answer (transcript)'), h('div', { className: 'answer' }, q.answer || 'No answer captured.')),
+    h('div', { className: 'full stack', style: 'gap:6px' },
+      h('h3', {}, q.editedAnswer !== null ? 'Candidate answer (corrected by interviewer)' : 'Candidate answer (transcript)'),
+      q.lowConfidence ? h('p', { className: 'notice warn' }, '⚠ This answer includes low-confidence speech recognition. Check the text before relying on the score.') : null,
+      q.answer || q.editedAnswer ? answerBox : h('div', { className: 'answer' }, 'No answer captured.'),
+      q.editedAnswer !== null ? h('details', {}, h('summary', { className: 'small muted' }, `Original transcript (edited by ${q.editedBy})`), h('div', { className: 'answer' }, q.answer)) : null,
+      q.answer || q.editedAnswer ? h('div', { style: 'display:flex;gap:8px;align-items:center;flex-wrap:wrap' },
+        h('button', { className: 'btn small', onclick: async (ev) => {
+          ev.stopPropagation();
+          const saved = await put(`${base}/answer`, { text: answerBox.value }, answerStatus);
+          if (saved) answerStatus.textContent = 'Correction saved. Re-evaluate to score it.';
+        } }, 'Save correction'),
+        q.editedAnswer !== null ? h('button', { className: 'btn small', onclick: async (ev) => {
+          ev.stopPropagation();
+          if (await put(`${base}/answer`, { text: null }, answerStatus)) load();
+        } }, 'Revert to original') : null,
+        h('button', { className: 'btn small primary', onclick: async (ev) => {
+          ev.stopPropagation();
+          if (await post(`${base}/reevaluate`, answerStatus)) {
+            answerStatus.textContent = 'Re-evaluating… the report will refresh.';
+            setTimeout(load, 2500);
+          }
+        } }, 'Re-evaluate'), answerStatus) : null),
     e ? h('div', { className: 'stack', style: 'gap:6px' },
-      h('h3', {}, `AI score ${e.score}/100${q.override ? ` · Interviewer score ${q.override.finalScore}/100` : ''}`),
+      h('h3', {}, `AI score ${e.score}/100${q.override ? ` · Interviewer score ${q.override.finalScore}/100` : ''}${q.lowConfidence ? ' ⚠' : ''}`),
       q.override ? h('p', { className: 'small muted' }, `Override reason: ${q.override.overrideReason} (${q.override.overriddenBy})`) : null,
       ...DIMENSIONS.map(([k, label, w]) => h('div', { className: 'bd' }, h('span', {}, `${label} `, h('span', { className: 'muted small' }, `${w}%`)), bar(e.breakdown[k]), h('span', { className: 'num' }, e.breakdown[k]))),
       h('p', { className: 'small muted' }, `${e.evaluator === 'llm' ? `AI evaluator (${e.model})` : 'Demo keyword scorer'} · confidence ${Math.round(e.confidence * 100)}%`)) :
@@ -217,6 +254,10 @@ function questionDetail(q) {
       h('h3', {}, 'Missing concepts'), list(e.missingConcepts, 'miss')) : null,
     e ? h('div', { className: 'stack', style: 'gap:6px' }, h('h3', {}, 'AI feedback'), list([...e.factualErrors.map((x) => `Error: ${x}`), ...e.strengths, ...e.improvements], 'plain')) : null,
     e?.followUpQuestion ? h('div', { className: 'stack', style: 'gap:6px' }, h('h3', {}, 'AI-suggested follow-up'), h('p', {}, e.followUpQuestion)) : null,
+    q.evaluationHistory?.length > 1 ? h('div', { className: 'full stack', style: 'gap:6px' },
+      h('h3', {}, `Evaluation history (${q.evaluationHistory.length} runs, newest first)`),
+      h('ul', { className: 'clist plain' }, [...q.evaluationHistory].reverse().map((run) => h('li', {},
+        `${run.score}/100 · ${fmtDate(run.evaluatedAt)} · ${run.trigger === 'reevaluate' ? 're-evaluated' : run.trigger === 'retry' ? 'retried' : 'automatic'} on ${run.answerSource} text · ${run.model}`)))) : null,
     h('div', { className: 'full stack', style: 'gap:6px' }, h('h3', {}, 'Interviewer note'), note,
       h('div', { style: 'display:flex;gap:12px;align-items:center' },
         h('button', { className: 'btn small', onclick: (ev) => { ev.stopPropagation(); put(`/api/interviews/${sessionId}/notes`, { questionId: q.questionId, text: note.value }, noteStatus); } }, 'Save note'), noteStatus)));

@@ -6,6 +6,7 @@ import type { ServerConfig } from '../types';
 import type { AuthService, User } from '../services/authService';
 import { AuthError } from '../services/authService';
 import type { ReportService } from '../services/reportService';
+import type { QuestionFlow } from '../services/questionFlow';
 import type { Difficulty } from '../services/evaluationTypes';
 import type { Decision, PlannedQuestion } from '../services/reportTypes';
 import {
@@ -59,9 +60,10 @@ type Deps = {
   sessions: SessionManager;
   auth: AuthService;
   reports: ReportService;
+  questionFlow: QuestionFlow;
 };
 
-export function createInterviewRouter({ config, sessions, auth, reports }: Deps): Router {
+export function createInterviewRouter({ config, sessions, auth, reports, questionFlow }: Deps): Router {
   const router = Router();
   const allowCreate = rateLimiter(30, 10 * 60_000);
   const allowJoin = rateLimiter(120, 10 * 60_000);
@@ -442,6 +444,45 @@ export function createInterviewRouter({ config, sessions, auth, reports }: Deps)
       updatedBy: user.name,
     };
     res.json({ review: s.review });
+  });
+
+  // Transcript correction and re-evaluation from the report page (owner only).
+  function ownedQuestion(req: Request, res: Response) {
+    const s = ownedSession(req, res);
+    if (!s) return null;
+    const qid = String(req.params.questionId);
+    const q = QUESTION_ID.test(qid) ? s.questions.find((x) => x.questionId === qid) : undefined;
+    if (!q) {
+      res.status(404).json({ error: 'Unknown question.' });
+      return null;
+    }
+    return { s, q };
+  }
+
+  router.put('/api/interviews/:sessionId/questions/:questionId/answer', (req, res) => {
+    const found = ownedQuestion(req, res);
+    if (!found) return;
+    const result = questionFlow.editAnswer(found.s, found.q, req.body?.text === null ? null : req.body?.text);
+    if (result !== true) {
+      res.status(400).json({ error: result });
+      return;
+    }
+    res.json({ question: found.q });
+  });
+
+  router.post('/api/interviews/:sessionId/questions/:questionId/reevaluate', (req, res) => {
+    const found = ownedQuestion(req, res);
+    if (!found) return;
+    const result = questionFlow.reevaluate(found.s, found.q);
+    if (result !== true) {
+      res.status(409).json({ error: result });
+      return;
+    }
+    // After the interview, refresh the report once the new evaluation lands.
+    if (sessions.isEnded(found.s)) {
+      void questionFlow.waitForQuestion(found.s.id).then(() => reports.generate(found.s));
+    }
+    res.status(202).json({ status: 'evaluating' });
   });
 
   // Private notes can still be edited after the interview (general or per question).

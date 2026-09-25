@@ -78,6 +78,8 @@ export type WSMessageType =
   | 'answer_silence_prompt'
   | 'answer_auto_ended'
   | 'new_question_detected'
+  | 'answer_edit'
+  | 'evaluation_reevaluate'
   | 'evaluation_started'
   | 'evaluation_completed'
   | 'evaluation_error'

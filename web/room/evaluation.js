@@ -244,11 +244,44 @@ export function createEvaluationPanel({ sendWS, toast, isVisible, setBadge }) {
         overrideForm(q),
       );
     }
-    if (q.answer) {
-      parts.push(h('details', {}, h('summary', {}, 'Candidate answer (transcript)'), h('div', { className: 'answer-box' }, q.answer)));
-    }
+    if (q.answer || q.editedAnswer) parts.push(answerEditor(q));
+    if (q.evaluationHistory?.length > 1) parts.push(historyView(q));
     parts.push(questionNote(q));
     box.replaceChildren(...parts.filter(Boolean)); // replaceChildren would print null as text
+  }
+
+  // Transcript correction: the original STT text is always kept.
+  function answerEditor(q) {
+    const open = q.questionId === st.currentId;
+    const current = q.editedAnswer ?? q.answer;
+    const busy = q.status === 'evaluating';
+    return h('details', {},
+      h('summary', {}, q.editedAnswer !== null ? 'Candidate answer (edited)' : 'Candidate answer (transcript)'),
+      h('textarea', { id: `ans-${q.questionId}`, rows: '5', maxlength: '8000', 'aria-label': 'Candidate answer text', disabled: open ? true : null }, current),
+      q.editedAnswer !== null
+        ? h('div', { className: 'score-sub' }, `Edited by ${q.editedBy} · ${new Date(q.editedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}. Original transcript is kept.`)
+        : null,
+      q.editedAnswer !== null ? h('details', {}, h('summary', {}, 'Original transcript'), h('div', { className: 'answer-box' }, q.answer)) : null,
+      h('div', { className: 'btn-row' },
+        h('button', { className: 'host-btn', type: 'button', disabled: open ? true : null, onclick: () => {
+          const text = $(`ans-${q.questionId}`).value.trim();
+          if (text && text !== current) sendWS({ type: 'answer_edit', questionId: q.questionId, text });
+        } }, 'Save correction'),
+        q.editedAnswer !== null
+          ? h('button', { className: 'host-btn', type: 'button', onclick: () => sendWS({ type: 'answer_edit', questionId: q.questionId, text: null }) }, 'Revert to original')
+          : null,
+        h('button', { className: 'host-btn primary', type: 'button', disabled: open || busy ? true : null,
+          title: open ? 'End the question first' : busy ? 'An evaluation is running' : 'Run a new evaluation on this text',
+          onclick: () => sendWS({ type: 'evaluation_reevaluate', questionId: q.questionId }) }, 'Re-evaluate')));
+  }
+
+  function historyView(q) {
+    return h('details', {},
+      h('summary', {}, `Evaluation history (${q.evaluationHistory.length} runs)`),
+      h('ol', { className: 'clist plain' }, [...q.evaluationHistory].reverse().map((e, i) => h('li', {},
+        `${e.score}/100 · ${new Date(e.evaluatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · `
+        + `${e.trigger === 'reevaluate' ? 're-evaluated' : e.trigger === 'retry' ? 'retried' : 'automatic'} on ${e.answerSource} text`
+        + (i === 0 ? ' (current)' : '')))));
   }
 
   function questionNote(q) {

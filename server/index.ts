@@ -135,7 +135,8 @@ const realtime = new InterviewRealtime(
   }
 );
 
-app.use(createInterviewRouter({ config, sessions, auth, reports }));
+app.use(createInterviewRouter({ config, sessions, auth, reports, questionFlow }));
+
 
 function now(): string {
   return new Date().toISOString();
@@ -424,6 +425,12 @@ wss.on('connection', (ws, req) => {
           break;
         case 'interview_settings':
           questionFlow.handleSettings(state, msg);
+          break;
+        case 'answer_edit':
+          questionFlow.handleAnswerEdit(state, msg);
+          break;
+        case 'evaluation_reevaluate':
+          questionFlow.handleReevaluate(state, msg);
           break;
 
         case 'ping': {
