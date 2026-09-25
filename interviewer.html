@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>InterviewAI — Interviewer</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    :root {
+      --bg: #0b1220; --panel: #111827; --surface: #0f172a; --soft: #1f2937;
+      --border: rgba(148,163,184,0.2); --text: #e2e8f0; --muted: #94a3b8;
+      --accent: #6366f1; --success: #22c55e; --warning: #f59e0b; --error: #ef4444;
+    }
+    body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+    button { font: inherit; cursor: pointer; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* Join screen */
+    .join { display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 16px; }
+    .card { max-width: 440px; width: 100%; padding: 2rem; background: var(--panel); border: 1px solid var(--border); border-radius: 1rem; }
+    h1 { font-size: 1.4rem; margin-bottom: 0.4rem; }
+    .subtitle { color: var(--muted); font-size: 0.85rem; margin-bottom: 1.5rem; line-height: 1.5; }
+    .field { margin-bottom: 1rem; }
+    label { display: block; font-size: 0.7rem; color: var(--muted); margin-bottom: 0.4rem; text-transform: uppercase; letter-spacing: 0.1em; }
+    input { width: 100%; padding: 0.7rem 1rem; border-radius: 0.75rem; border: 1px solid var(--border); background: var(--surface); color: var(--text); font-size: 0.875rem; }
+    .primary { width: 100%; padding: 0.75rem; border-radius: 0.75rem; border: none; background: var(--accent); color: #fff; font-weight: 600; margin-top: 0.5rem; }
+    .info { margin-top: 1.25rem; padding: 0.9rem 1rem; border-radius: 0.75rem; background: rgba(99,102,241,0.1); border: 1px solid rgba(99,102,241,0.2); font-size: 0.75rem; color: var(--muted); line-height: 1.6; }
+    .error { margin-top: 0.75rem; color: var(--error); font-size: 0.8rem; min-height: 1em; }
+
+    /* Call screen */
+    .call { display: none; flex-direction: column; height: 100vh; }
+    header { display: flex; align-items: center; gap: 10px; padding: 10px 20px; border-bottom: 1px solid var(--border); background: var(--panel); flex-wrap: wrap; }
+    header .brand { font-weight: 700; margin-right: 6px; }
+    header .brand small { color: var(--muted); font-weight: 500; margin-left: 4px; }
+    .chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 0.72rem; font-weight: 600; background: var(--soft); color: var(--muted); }
+    .chip .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+    .chip.ok { color: var(--success); background: rgba(34,197,94,0.1); } .chip.ok .dot { background: var(--success); }
+    .chip.wait { color: var(--warning); background: rgba(245,158,11,0.1); } .chip.wait .dot { background: var(--warning); }
+
+    .body { flex: 1; display: flex; min-height: 0; }
+    main { flex: 1; display: flex; flex-direction: column; gap: 12px; padding: 16px 20px; min-height: 0; min-width: 0; }
+
+    /* Interview chat */
+    aside { width: 340px; flex-shrink: 0; display: flex; flex-direction: column; border-left: 1px solid var(--border); background: var(--panel); min-height: 0; }
+    aside h2 { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.12em; color: var(--muted); padding: 14px 16px 8px; }
+    .messages { flex: 1; overflow-y: auto; padding: 4px 16px 12px; display: flex; flex-direction: column; gap: 10px; }
+    .msg { max-width: 90%; padding: 8px 10px; border-radius: 10px; background: var(--soft); border: 1px solid var(--border); font-size: 0.85rem; line-height: 1.45; white-space: pre-wrap; word-wrap: break-word; }
+    .msg.mine { align-self: flex-end; background: rgba(99,102,241,0.15); border-color: var(--accent); }
+    .msg .who { display: block; font-size: 0.65rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 2px; color: #60a5fa; }
+    .msg.ai .who, .msg.mine .who { color: #a5b4fc; }
+    .msg .who time { font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--muted); margin-left: 6px; }
+    .thinking { display: none; font-size: 0.8rem; color: var(--muted); padding: 0 16px 8px; }
+    .thinking.on { display: block; }
+    .chat-error { display: none; margin: 0 16px 8px; padding: 6px 10px; border-radius: 8px; font-size: 0.75rem; color: var(--error); background: rgba(239,68,68,0.1); }
+    .chat-error.on { display: block; }
+    .chat-form { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--border); }
+    .chat-form textarea { flex: 1; resize: none; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--border); background: var(--surface); color: var(--text); font: inherit; font-size: 0.85rem; }
+    .chat-form button { padding: 0 14px; border-radius: 10px; border: none; background: var(--accent); color: #fff; font-weight: 600; font-size: 0.85rem; }
+    .empty-chat { color: var(--muted); font-size: 0.8rem; text-align: center; margin-top: 24px; }
+    .stage { flex: 1; min-height: 0; display: flex; flex-direction: column; border-radius: 1rem; overflow: hidden; border: 1px solid var(--border); background: var(--surface); }
+    .stage-banner { display: none; padding: 6px 14px; font-size: 0.75rem; font-weight: 600; background: var(--accent); color: #fff; }
+    .stage.sharing .stage-banner { display: block; }
+    .row { display: flex; gap: 12px; height: 170px; flex-shrink: 0; }
+
+    .tile { position: relative; overflow: hidden; border-radius: 0.8rem; background: var(--surface); border: 1px solid var(--border); flex: 1; min-height: 0; }
+    .stage .tile { border: none; border-radius: 0; }
+    .row .tile { flex: 0 0 auto; aspect-ratio: 16 / 9; height: 100%; }
+    .tile video { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .stage .tile video.contain { object-fit: contain; background: #000; }
+    .tile video.mirror { transform: scaleX(-1); }
+    .tile .empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; text-align: center; padding: 12px; color: var(--muted); font-size: 0.8rem; }
+    .tile .label { position: absolute; left: 8px; bottom: 8px; padding: 2px 8px; border-radius: 6px; font-size: 0.72rem; font-weight: 600; background: rgba(15,23,42,0.75); color: #fff; }
+    .tile.hidden { display: none; }
+
+    .controls { display: flex; gap: 8px; align-items: center; padding: 12px 20px; border-top: 1px solid var(--border); background: var(--panel); }
+    .ctl { padding: 0.55rem 1rem; border-radius: 0.7rem; border: 1px solid rgba(34,197,94,0.3); background: rgba(34,197,94,0.15); color: var(--success); font-weight: 600; font-size: 0.85rem; }
+    .ctl.off { border-color: var(--border); background: rgba(148,163,184,0.15); color: var(--muted); }
+    .ctl.leave { margin-left: auto; border: none; background: var(--error); color: #fff; }
+    .note { font-size: 0.72rem; color: var(--muted); }
+
+    @media (max-width: 900px) {
+      .body { flex-direction: column; overflow-y: auto; }
+      main { min-height: 420px; }
+      aside { width: 100%; border-left: none; border-top: 1px solid var(--border); min-height: 360px; }
+    }
+
+    @media (max-width: 720px) {
+      main { padding: 12px; }
+      .row { height: 110px; }
+      .note { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <section class="join" id="joinView">
+    <div class="card">
+      <h1>Interviewer</h1>
+      <p class="subtitle">Join the interview room with camera and microphone. You'll see the candidate's camera and, when they share it, their interview workspace.</p>
+
+      <div class="field">
+        <label for="serverUrl">Server URL</label>
+        <input id="serverUrl" value="http://localhost:3001" />
+      </div>
+      <div class="field">
+        <label for="roomName">Room Name</label>
+        <input id="roomName" value="interview-room" />
+      </div>
+      <div class="field">
+        <label for="participantName">Your Name</label>
+        <input id="participantName" value="interviewer" />
+      </div>
+
+      <button id="joinBtn" class="primary">Join as Interviewer</button>
+      <div class="error" id="joinError" role="alert"></div>
+
+      <div class="info">
+        <strong>How this works:</strong><br>
+        1. Enter the same room name as the candidate<br>
+        2. Join and allow camera and microphone access<br>
+        3. Ask your interview questions<br>
+        4. Your audio is transcribed and used by the candidate's AI interview assistant
+      </div>
+    </div>
+  </section>
+
+  <section class="call" id="callView">
+    <header>
+      <span class="brand">InterviewAI <small>Interviewer</small></span>
+      <span class="chip" id="roomChip"><span class="dot"></span><span id="roomChipText">Room</span></span>
+      <span class="chip wait" id="connChip"><span class="dot"></span><span id="connText">Connecting</span></span>
+      <span class="chip wait" id="candChip"><span class="dot"></span><span id="candText">Waiting for candidate</span></span>
+    </header>
+
+    <div class="body">
+    <main>
+      <!-- What the interviewer sees: candidate's shared workspace (or camera) large -->
+      <div class="stage" id="stage">
+        <div class="stage-banner">Candidate's shared interview workspace</div>
+        <div class="tile" id="mainTile">
+          <video id="mainVideo" autoplay playsinline muted></video>
+          <div class="empty" id="mainEmpty">Waiting for the candidate to join…</div>
+          <span class="label" id="mainLabel">Candidate</span>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="tile hidden" id="candTile">
+          <video id="candVideo" autoplay playsinline muted></video>
+          <div class="empty" id="candEmpty">Camera off</div>
+          <span class="label">Candidate camera</span>
+        </div>
+        <div class="tile" id="selfTile">
+          <video id="selfVideo" class="mirror" autoplay playsinline muted></video>
+          <div class="empty" id="selfEmpty">Camera off</div>
+          <span class="label">You (interviewer)</span>
+        </div>
+      </div>
+    </main>
+
+    <aside aria-label="Interview chat">
+      <h2>Interview chat</h2>
+      <div class="messages" id="messages">
+        <div class="empty-chat" id="emptyChat">No messages yet.</div>
+      </div>
+      <div class="thinking" id="thinking" role="status">AI Interviewer is thinking…</div>
+      <div class="chat-error" id="chatError" role="alert"></div>
+      <form class="chat-form" id="chatForm">
+        <textarea id="chatInput" rows="2" maxlength="2000" placeholder="Message… (Enter to send)" aria-label="Chat message"></textarea>
+        <button type="submit" id="chatSend">Send</button>
+      </form>
+    </aside>
+    </div>
+
+    <div class="controls">
+      <button class="ctl" id="micBtn">Mic On</button>
+      <button class="ctl" id="camBtn">Camera On</button>
+      <span class="note">The candidate hears you; their audio plays here.</span>
+      <button class="ctl leave" id="leaveBtn">Leave</button>
+    </div>
+  </section>
+
+  <script type="module">
+    import { Room, RoomEvent, Track, ConnectionState } from 'https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.esm.mjs';
+
+    const $ = (id) => document.getElementById(id);
+    let room = null;
+    const remoteAudio = new Map();
+
+    // Default to the serving origin when opened via the server's /interviewer route.
+    if (location.protocol.startsWith('http')) {
+      $('serverUrl').value = location.origin;
+    }
+
+    function setChip(id, textId, state, text) {
+      $(id).className = `chip ${state}`;
+      $(textId).textContent = text;
+    }
+
+    function liveTrack(pub) {
+      return pub && !pub.isMuted && pub.track ? pub.track.mediaStreamTrack : null;
+    }
+
+    function show(videoEl, emptyEl, track, emptyText) {
+      const current = videoEl.srcObject?.getVideoTracks?.()[0] ?? null;
+      if (current !== track) videoEl.srcObject = track ? new MediaStream([track]) : null;
+      videoEl.style.visibility = track ? 'visible' : 'hidden';
+      emptyEl.style.display = track ? 'none' : 'flex';
+      if (emptyText) emptyEl.textContent = emptyText;
+    }
+
+    // Recompute every tile from the room state; called on any track or participant change.
+    function render() {
+      if (!room) return;
+      const candidate = Array.from(room.remoteParticipants.values())[0];
+      const camera = liveTrack(candidate?.getTrackPublication(Track.Source.Camera));
+      const screen = liveTrack(candidate?.getTrackPublication(Track.Source.ScreenShare));
+      const self = liveTrack(room.localParticipant.getTrackPublication(Track.Source.Camera));
+
+      if (screen) {
+        $('stage').classList.add('sharing');
+        $('mainVideo').classList.add('contain');
+        $('mainLabel').textContent = 'Shared workspace';
+        show($('mainVideo'), $('mainEmpty'), screen);
+        $('candTile').classList.remove('hidden');
+        show($('candVideo'), $('candEmpty'), camera, 'Camera off');
+      } else {
+        $('stage').classList.remove('sharing');
+        $('mainVideo').classList.remove('contain');
+        $('mainLabel').textContent = 'Candidate';
+        show($('mainVideo'), $('mainEmpty'), camera,
+          candidate ? 'Candidate camera is off' : 'Waiting for the candidate to join…');
+        $('candTile').classList.add('hidden');
+      }
+      show($('selfVideo'), $('selfEmpty'), self, 'Camera off');
+
+      if (candidate) {
+        setChip('candChip', 'candText', 'ok', screen ? 'Candidate sharing workspace' : 'Candidate in call');
+      } else {
+        setChip('candChip', 'candText', 'wait', 'Waiting for candidate');
+      }
+
+      const mic = room.localParticipant.isMicrophoneEnabled;
+      const cam = room.localParticipant.isCameraEnabled;
+      $('micBtn').textContent = mic ? 'Mic On' : 'Mic Off';
+      $('micBtn').className = mic ? 'ctl' : 'ctl off';
+      $('camBtn').textContent = cam ? 'Camera On' : 'Camera Off';
+      $('camBtn').className = cam ? 'ctl' : 'ctl off';
+    }
+
+    function attachAudio(track, publication) {
+      if (track.kind !== Track.Kind.Audio) return;
+      const el = track.attach();
+      el.style.display = 'none';
+      document.body.appendChild(el);
+      remoteAudio.set(publication.trackSid, { track, el });
+    }
+
+    function detachAudio(track, publication) {
+      const entry = remoteAudio.get(publication.trackSid);
+      if (!entry) return;
+      entry.track.detach(entry.el);
+      entry.el.remove();
+      remoteAudio.delete(publication.trackSid);
+    }
+
+    function detachAllAudio() {
+      remoteAudio.forEach(({ track, el }) => { track.detach(el); el.remove(); });
+      remoteAudio.clear();
+    }
+
+    async function joinRoom() {
+      const serverUrl = $('serverUrl').value.replace(/\/$/, '');
+      const roomName = $('roomName').value.trim();
+      const participantName = $('participantName').value.trim() || 'interviewer';
+
+      $('joinBtn').disabled = true;
+      $('joinBtn').textContent = 'Connecting...';
+      $('joinError').textContent = '';
+
+      try {
+        const resp = await fetch(`${serverUrl}/livekit/token`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            roomName,
+            participantName,
+            participantIdentity: `interviewer-${Date.now()}`,
+            role: 'interviewer',
+          }),
+        });
+
+        if (!resp.ok) {
+          const errBody = await resp.json().catch(() => ({ error: resp.statusText }));
+          throw new Error(errBody.error || `HTTP ${resp.status}`);
+        }
+        const { token, url, sessionId, participantKey } = await resp.json();
+        startChat(serverUrl, sessionId, participantKey);
+
+        room = new Room({ adaptiveStream: true, dynacast: true });
+
+        room.on(RoomEvent.ConnectionStateChanged, (state) => {
+          const ok = state === ConnectionState.Connected;
+          setChip('connChip', 'connText', ok ? 'ok' : 'wait', ok ? 'Connected' : state);
+        });
+        room.on(RoomEvent.TrackSubscribed, attachAudio);
+        room.on(RoomEvent.TrackUnsubscribed, detachAudio);
+        for (const ev of [
+          RoomEvent.TrackSubscribed, RoomEvent.TrackUnsubscribed,
+          RoomEvent.TrackMuted, RoomEvent.TrackUnmuted,
+          RoomEvent.LocalTrackPublished, RoomEvent.LocalTrackUnpublished,
+          RoomEvent.ParticipantConnected, RoomEvent.ParticipantDisconnected,
+        ]) {
+          room.on(ev, render);
+        }
+        room.on(RoomEvent.Disconnected, () => showJoin());
+
+        await room.connect(url, token);
+        await room.localParticipant.setMicrophoneEnabled(true);
+        try {
+          await room.localParticipant.setCameraEnabled(true);
+        } catch (err) {
+          console.warn('Camera unavailable:', err);
+        }
+
+        $('roomChipText').textContent = `Room ${roomName}`;
+        setChip('connChip', 'connText', 'ok', 'Connected');
+        $('joinView').style.display = 'none';
+        $('callView').style.display = 'flex';
+        render();
+      } catch (err) {
+        if (room) {
+          await room.disconnect().catch(() => {});
+          room = null;
+        }
+        stopChat();
+        detachAllAudio();
+        $('joinError').textContent = 'Failed to join: ' + err.message;
+        $('joinBtn').disabled = false;
+        $('joinBtn').textContent = 'Join as Interviewer';
+      }
+    }
+
+    function showJoin() {
+      stopChat();
+      detachAllAudio();
+      for (const id of ['mainVideo', 'candVideo', 'selfVideo']) $(id).srcObject = null;
+      $('callView').style.display = 'none';
+      $('joinView').style.display = 'flex';
+      $('joinBtn').disabled = false;
+      $('joinBtn').textContent = 'Join as Interviewer';
+    }
+
+    async function leaveRoom() {
+      const r = room;
+      room = null;
+      if (r) await r.disconnect();
+      showJoin();
+    }
+
+    async function toggle(kind) {
+      if (!room) return;
+      const lp = room.localParticipant;
+      try {
+        if (kind === 'mic') await lp.setMicrophoneEnabled(!lp.isMicrophoneEnabled);
+        else await lp.setCameraEnabled(!lp.isCameraEnabled);
+      } catch (err) {
+        console.error(`${kind} toggle failed:`, err);
+      }
+      render();
+    }
+
+    // --- Interview chat (WebSocket → server → LLM → WebSocket) ---
+    const chat = { ws: null, sessionId: null, participantKey: null, wsUrl: null, pending: false, retry: null };
+    const LABEL = { candidate: 'Candidate', interviewer: 'You', ai_interviewer: 'AI Interviewer' };
+    const seen = new Set();
+
+    function startChat(serverUrl, sessionId, participantKey) {
+      const u = new URL(serverUrl);
+      chat.wsUrl = `${u.protocol === 'https:' ? 'wss:' : 'ws:'}//${u.host}/?view=interviewer`;
+      chat.sessionId = sessionId;
+      chat.participantKey = participantKey;
+      connectChat();
+    }
+
+    function connectChat() {
+      if (!chat.sessionId) return;
+      const ws = new WebSocket(chat.wsUrl);
+      chat.ws = ws;
+      ws.onopen = () => {
+        showChatError('');
+        ws.send(JSON.stringify({ type: 'session_join', sessionId: chat.sessionId, participantKey: chat.participantKey }));
+      };
+      ws.onmessage = (ev) => {
+        let msg;
+        try { msg = JSON.parse(ev.data); } catch { return; }
+        switch (msg.type) {
+          case 'session_joined':
+            $('messages').querySelectorAll('.msg').forEach((n) => n.remove());
+            seen.clear();
+            msg.history.forEach(addChat);
+            setPending(msg.pending);
+            break;
+          case 'chat_user_message':
+            addChat(msg);
+            break;
+          case 'chat_response':
+            addChat({ ...msg, sender: 'ai_interviewer' });
+            break;
+          case 'chat_pending':
+            setPending(msg.pending);
+            break;
+          case 'chat_error':
+            showChatError(msg.message || 'Unable to generate response');
+            setPending(Boolean(msg.pending));
+            break;
+        }
+      };
+      ws.onclose = () => {
+        if (chat.ws !== ws || !chat.sessionId) return;
+        showChatError('Chat disconnected. Reconnecting…');
+        setPending(false);
+        chat.retry = setTimeout(connectChat, 3000);
+      };
+    }
+
+    function stopChat() {
+      chat.sessionId = null;
+      clearTimeout(chat.retry);
+      if (chat.ws) { const ws = chat.ws; chat.ws = null; ws.close(); }
+      $('messages').querySelectorAll('.msg').forEach((n) => n.remove());
+      $('emptyChat').style.display = 'block';
+      seen.clear();
+      setPending(false);
+      showChatError('');
+    }
+
+    function addChat(m) {
+      if (seen.has(m.id)) return;
+      seen.add(m.id);
+      $('emptyChat').style.display = 'none';
+      const el = document.createElement('div');
+      el.className = `msg${m.sender === 'interviewer' ? ' mine' : ''}${m.sender === 'ai_interviewer' ? ' ai' : ''}`;
+      const who = document.createElement('span');
+      who.className = 'who';
+      who.textContent = LABEL[m.sender] || m.sender;
+      const t = document.createElement('time');
+      t.textContent = new Date(m.timestamp).toLocaleTimeString('en-US', { hour12: false });
+      who.appendChild(t);
+      el.appendChild(who);
+      el.appendChild(document.createTextNode(m.message)); // textContent only: never render HTML from messages
+      $('messages').appendChild(el);
+      $('messages').scrollTop = $('messages').scrollHeight;
+    }
+
+    function setPending(p) {
+      chat.pending = p;
+      $('thinking').classList.toggle('on', p);
+      $('chatSend').disabled = p;
+    }
+
+    function showChatError(text) {
+      $('chatError').textContent = text;
+      $('chatError').classList.toggle('on', !!text);
+    }
+
+    function sendChat(e) {
+      e?.preventDefault();
+      const text = $('chatInput').value.trim();
+      if (!text || chat.pending) return;
+      if (!chat.ws || chat.ws.readyState !== WebSocket.OPEN) {
+        showChatError('Not connected to the interview server.');
+        return;
+      }
+      chat.ws.send(JSON.stringify({ type: 'chat_message', sessionId: chat.sessionId, sender: 'interviewer', message: text }));
+      $('chatInput').value = '';
+      showChatError('');
+      setPending(true);
+    }
+
+    $('chatForm').addEventListener('submit', sendChat);
+    $('chatInput').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) sendChat(e);
+    });
+
+    $('joinBtn').addEventListener('click', joinRoom);
+    $('leaveBtn').addEventListener('click', leaveRoom);
+    $('micBtn').addEventListener('click', () => toggle('mic'));
+    $('camBtn').addEventListener('click', () => toggle('cam'));
+  </script>
+</body>
+</html>

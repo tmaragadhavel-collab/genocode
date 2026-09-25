@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="referrer" content="no-referrer">
+  <title>Interviews · AI Interview</title>
+  <link rel="stylesheet" href="/room-assets/pages.css">
+</head>
+<body>
+  <nav class="topnav">
+    <a class="brand" href="/dashboard"><span class="brand-mark" aria-hidden="true"></span>AI Interview</a>
+    <div class="nav-right">
+      <span class="muted small hide-sm" id="who"></span>
+      <button class="btn small" id="logout">Sign out</button>
+    </div>
+  </nav>
+  <main class="page">
+    <div class="page-head">
+      <div>
+        <h1>Interviews</h1>
+        <p class="muted">Schedule interviews, share the candidate link, and review reports.</p>
+      </div>
+      <a class="btn primary" href="/interview/new">+ New interview</a>
+    </div>
+
+    <div class="card" id="listCard">
+      <div class="center-state" id="loading" style="min-height:160px"><span class="spinner"></span>Loading interviews…</div>
+      <div class="center-state" id="empty" style="min-height:160px" hidden>
+        <p>No interviews yet.</p>
+        <a class="btn primary" href="/interview/new">Schedule your first interview</a>
+      </div>
+      <div class="notice error" id="loadError" hidden></div>
+      <div style="overflow-x:auto"><table class="table" id="table" hidden>
+        <thead><tr><th>Candidate</th><th>Position</th><th>Status</th><th class="hide-sm">Created</th><th>Score</th><th></th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table></div>
+    </div>
+  </main>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const el = (tag, props = {}, ...kids) => { const n = Object.assign(document.createElement(tag), props); n.append(...kids); return n; };
+
+    async function load() {
+      const resp = await fetch('/api/interviews');
+      if (resp.status === 401) { location.replace('/login?next=/dashboard'); return; }
+      $('loading').hidden = true;
+      if (!resp.ok) {
+        $('loadError').hidden = false;
+        $('loadError').textContent = 'Could not load interviews. Refresh the page to try again.';
+        return;
+      }
+      const { interviews } = await resp.json();
+      if (!interviews.length) { $('empty').hidden = false; return; }
+      $('table').hidden = false;
+      $('rows').replaceChildren(...interviews.map((iv) => {
+        const actions = el('td', { style: 'text-align:right;white-space:nowrap' });
+        if (iv.status === 'COMPLETED' || iv.status === 'CANCELLED') {
+          if (iv.reportStatus !== 'none') actions.append(el('a', { className: 'btn small primary', href: `/interview/${iv.sessionId}/report` }, 'View report'));
+        } else {
+          const copy = el('button', { className: 'btn small' }, 'Copy candidate link');
+          copy.addEventListener('click', async () => {
+            await navigator.clipboard.writeText(iv.candidateUrl).catch(() => prompt('Candidate link', iv.candidateUrl));
+            copy.textContent = 'Copied';
+            setTimeout(() => { copy.textContent = 'Copy candidate link'; }, 1500);
+          });
+          actions.append(copy, ' ', el('a', { className: 'btn small primary', href: iv.interviewerUrl }, 'Enter room'));
+        }
+        return el('tr', {},
+          el('td', {}, iv.candidateName),
+          el('td', {}, iv.position),
+          el('td', {}, el('span', { className: `pill ${iv.status}` }, iv.status.toLowerCase())),
+          el('td', { className: 'hide-sm muted' }, new Date(iv.createdAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })),
+          el('td', { className: 'num' }, iv.averageScore === null ? '—' : `${iv.averageScore}/100`),
+          actions);
+      }));
+    }
+
+    fetch('/api/auth/me').then((r) => r.json()).then((d) => { if (d.user) $('who').textContent = `${d.user.name} · ${d.user.email}`; }).catch(() => {});
+    $('logout').addEventListener('click', async () => {
+      await fetch('/api/auth/logout', { method: 'POST' });
+      location.replace('/login');
+    });
+    load().catch(() => {
+      $('loading').hidden = true;
+      $('loadError').hidden = false;
+      $('loadError').textContent = 'Could not reach the server. Refresh the page to try again.';
+    });
+  </script>
+</body>
+</html>

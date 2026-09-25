@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="referrer" content="no-referrer">
+  <title>Sign in · AI Interview</title>
+  <link rel="stylesheet" href="/room-assets/pages.css">
+</head>
+<body>
+  <main class="center-state" style="min-height:100vh">
+    <div class="card stack" style="width:100%;max-width:400px;text-align:left;color:var(--text)">
+      <span class="brand"><span class="brand-mark" aria-hidden="true"></span>AI Interview</span>
+      <div>
+        <h1 id="title">Sign in</h1>
+        <p class="muted" id="subtitle">Interviewers sign in to schedule and run interviews.</p>
+      </div>
+      <form class="stack" id="authForm" novalidate>
+        <label class="field" id="nameField" hidden>Your name <input name="name" autocomplete="name" maxlength="80"></label>
+        <label class="field">Email <input name="email" type="email" autocomplete="email" required maxlength="254"></label>
+        <label class="field">Password <input name="password" type="password" autocomplete="current-password" required minlength="8" maxlength="200"></label>
+        <button class="btn primary block" id="submitBtn">Sign in</button>
+        <p class="form-error" id="error" role="alert"></p>
+      </form>
+      <p class="small muted" id="switchText">New here? <a href="#" id="switchLink">Create an interviewer account</a></p>
+      <p class="small muted">Candidates don't need an account; they join with the link they were sent.</p>
+    </div>
+  </main>
+  <script>
+    let mode = 'login';
+    const $ = (id) => document.getElementById(id);
+    const next = new URLSearchParams(location.search).get('next');
+    // Only same-site relative paths, to avoid open redirects.
+    const target = next && next.startsWith('/') && !next.startsWith('//') ? next : '/dashboard';
+
+    function setMode(m) {
+      mode = m;
+      $('title').textContent = m === 'login' ? 'Sign in' : 'Create account';
+      $('submitBtn').textContent = m === 'login' ? 'Sign in' : 'Create account';
+      $('nameField').hidden = m === 'login';
+      document.querySelector('[name=password]').autocomplete = m === 'login' ? 'current-password' : 'new-password';
+      $('switchText').firstChild.textContent = m === 'login' ? 'New here? ' : 'Already have an account? ';
+      $('switchLink').textContent = m === 'login' ? 'Create an interviewer account' : 'Sign in';
+      $('error').textContent = '';
+    }
+    $('switchLink').addEventListener('click', (e) => { e.preventDefault(); setMode(mode === 'login' ? 'signup' : 'login'); });
+
+    fetch('/api/auth/me').then((r) => r.json()).then((d) => { if (d.user) location.replace(target); }).catch(() => {});
+
+    $('authForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const data = Object.fromEntries(new FormData(e.target));
+      $('submitBtn').disabled = true;
+      $('error').textContent = '';
+      try {
+        const resp = await fetch(`/api/auth/${mode}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(data),
+        });
+        const body = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(body.error || 'Something went wrong.');
+        location.replace(target);
+      } catch (err) {
+        $('error').textContent = err.message === 'Failed to fetch' ? 'Could not reach the server. Check your connection and try again.' : err.message;
+      } finally {
+        $('submitBtn').disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
