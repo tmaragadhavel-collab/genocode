@@ -1,7 +1,7 @@
 import { randomBytes, scrypt as scryptCb, timingSafeEqual, createHash } from 'crypto';
 import { promisify } from 'util';
 import type { Request, Response, NextFunction } from 'express';
-import { JsonStore } from './jsonStore';
+import type { PrismaClient } from '@prisma/client';
 
 const scrypt = promisify(scryptCb) as (pw: string, salt: string, len: number) => Promise<Buffer>;
 
@@ -17,12 +17,6 @@ export type User = {
 export type PublicUser = { id: string; email: string; name: string };
 
 type AuthSession = { userId: string; expiresAt: number };
-
-type AuthState = {
-  users: User[];
-  // Keyed by SHA-256 of the cookie token, so a leaked data file can't be replayed.
-  sessions: Record<string, AuthSession>;
-};
 
 export const SESSION_COOKIE = 'ia_session';
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -48,20 +42,21 @@ export function parseCookies(header: string | undefined): Record<string, string>
 export class AuthService {
   private users = new Map<string, User>(); // by id
   private sessions = new Map<string, AuthSession>();
-  private readonly store: JsonStore<AuthState>;
+  constructor(
+    private readonly prisma: PrismaClient,
+    private readonly secureCookies: boolean
+  ) {}
 
-  constructor(private readonly secureCookies: boolean) {
-    this.store = new JsonStore<AuthState>('auth', () => ({
-      users: [...this.users.values()],
-      sessions: Object.fromEntries(this.sessions),
-    }));
-    const saved = this.store.load();
-    for (const u of saved?.users ?? []) this.users.set(u.id, u);
-    const now = Date.now();
-    for (const [k, s] of Object.entries(saved?.sessions ?? {})) {
-      if (s.expiresAt > now && this.users.has(s.userId)) this.sessions.set(k, s);
+  /** Loads accounts and unexpired login sessions from the database. */
+  async init(): Promise<void> {
+    const now = new Date();
+    await this.prisma.authSession.deleteMany({ where: { expiresAt: { lt: now } } });
+    for (const u of await this.prisma.user.findMany()) {
+      this.users.set(u.id, { ...u, createdAt: u.createdAt.getTime() });
     }
-    this.store.autosave();
+    for (const s of await this.prisma.authSession.findMany()) {
+      this.sessions.set(s.tokenHash, { userId: s.userId, expiresAt: s.expiresAt.getTime() });
+    }
   }
 
   toPublic(u: User): PublicUser {
@@ -92,8 +87,8 @@ export class AuthService {
       salt,
       createdAt: Date.now(),
     };
+    await this.prisma.user.create({ data: { ...user, createdAt: new Date(user.createdAt) } });
     this.users.set(user.id, user);
-    this.store.flush();
     return user;
   }
 
@@ -109,9 +104,12 @@ export class AuthService {
     return user;
   }
 
-  startSession(res: Response, user: User): void {
+  // Sessions are keyed by SHA-256 of the cookie token, so a leaked database can't be replayed.
+  async startSession(res: Response, user: User): Promise<void> {
     const token = randomBytes(32).toString('base64url');
-    this.sessions.set(hashToken(token), { userId: user.id, expiresAt: Date.now() + SESSION_TTL_MS });
+    const expiresAt = Date.now() + SESSION_TTL_MS;
+    await this.prisma.authSession.create({ data: { tokenHash: hashToken(token), userId: user.id, expiresAt: new Date(expiresAt) } });
+    this.sessions.set(hashToken(token), { userId: user.id, expiresAt });
     res.cookie(SESSION_COOKIE, token, {
       httpOnly: true,
       sameSite: 'lax',
@@ -121,9 +119,12 @@ export class AuthService {
     });
   }
 
-  endSession(req: Request, res: Response): void {
+  async endSession(req: Request, res: Response): Promise<void> {
     const token = parseCookies(req.headers.cookie)[SESSION_COOKIE];
-    if (token) this.sessions.delete(hashToken(token));
+    if (token) {
+      this.sessions.delete(hashToken(token));
+      await this.prisma.authSession.deleteMany({ where: { tokenHash: hashToken(token) } });
+    }
     res.clearCookie(SESSION_COOKIE, { path: '/' });
   }
 

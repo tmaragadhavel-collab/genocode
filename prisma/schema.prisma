@@ -1,0 +1,218 @@
+// SQLite schema for the interview platform.
+// JSON-shaped fields are stored as TEXT (JSON.stringify) for portability.
+// Apply with: npm run db:setup
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String        @id
+  email        String        @unique
+  name         String
+  passwordHash String
+  salt         String
+  createdAt    DateTime
+  sessions     AuthSession[]
+  interviews   Interview[]
+}
+
+/// Login sessions; only a SHA-256 hash of the cookie token is stored.
+model AuthSession {
+  tokenHash String   @id
+  userId    String
+  expiresAt DateTime
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Interview {
+  id                        String    @id
+  roomName                  String    @unique
+  ownerId                   String?
+  owner                     User?     @relation(fields: [ownerId], references: [id])
+  status                    String
+  candidateName             String
+  candidateEmail            String?
+  interviewerName           String
+  position                  String
+  durationMinutes           Int
+  allowCandidateScreenShare Boolean
+  skills                    String // JSON string[]
+  difficulty                String
+  plannedQuestions          String // JSON PlannedQuestion[]
+  candidateKey              String // capability in the candidate invite link
+  settings                  String // JSON { autoEndOnSilence, silenceSeconds }
+  review                    String // JSON InterviewerReview (human-controlled)
+  reportStatus              String
+  currentQuestionId         String?
+  // Timer: LIVE time accumulated before the current LIVE stretch, plus the start
+  // of that stretch. Remaining time on restart = duration - elapsedMs - (now - liveSince).
+  elapsedMs                 Int       @default(0)
+  liveSince                 DateTime?
+  createdAt                 DateTime
+  startedAt                 DateTime?
+  endedAt                   DateTime?
+  lastActivity              DateTime
+
+  participants Participant[]
+  questions    Question[]
+  answers      Answer[]
+  transcript   TranscriptSegment[]
+  evaluations  Evaluation[]
+  overrides    ScoreOverride[]
+  notes        InterviewerNote[]
+  chat         ChatMessage[]
+  reports      FinalReport[]
+
+  @@index([ownerId])
+}
+
+/// WebSocket credentials issued at join; only a hash of the key is stored.
+model Participant {
+  keyHash     String    @id
+  interviewId String
+  role        String
+  name        String
+  createdAt   DateTime
+  interview   Interview @relation(fields: [interviewId], references: [id], onDelete: Cascade)
+
+  @@index([interviewId])
+}
+
+model Question {
+  id                String    @id
+  interviewId       String
+  index             Int
+  text              String
+  expectedAnswer    String
+  expectedConcepts  String // JSON string[]
+  difficulty        String
+  skills            String // JSON string[]
+  scoringCriteria   String
+  rubricSource      String
+  plannedQuestionId String?
+  status            String
+  evaluationError   String?
+  askedAt           DateTime
+  answerStartedAt   DateTime?
+  answeredAt        DateTime?
+  interview         Interview @relation(fields: [interviewId], references: [id], onDelete: Cascade)
+
+  @@unique([interviewId, index])
+}
+
+/// The candidate's answer to a question: the STT original and any interviewer correction.
+model Answer {
+  questionId         String    @id
+  interviewId        String
+  originalTranscript String
+  editedTranscript   String?
+  editedBy           String?
+  editedAt           DateTime?
+  lowConfidence      Boolean   @default(false)
+  interview          Interview @relation(fields: [interviewId], references: [id], onDelete: Cascade)
+
+  @@index([interviewId])
+}
+
+model TranscriptSegment {
+  id            String    @id
+  interviewId   String
+  questionId    String?
+  speaker       String
+  text          String
+  timestamp     DateTime
+  source        String // 'stt' | 'manual'
+  avgLogprob    Float?
+  noSpeechProb  Float?
+  lowConfidence Boolean   @default(false)
+  interview     Interview @relation(fields: [interviewId], references: [id], onDelete: Cascade)
+
+  @@index([interviewId, timestamp])
+}
+
+/// Append-only: re-evaluations add rows, never overwrite.
+model Evaluation {
+  id               String    @id
+  interviewId      String
+  questionId       String
+  score            Int // computed by the backend from the sub-scores
+  correctness      Int
+  completeness     Int
+  relevance        Int
+  technicalDepth   Int
+  clarity          Int
+  coveredConcepts  String // JSON string[]
+  missingConcepts  String
+  factualErrors    String
+  strengths        String
+  improvements     String
+  confidence       Float
+  followUpQuestion String?
+  evaluator        String // 'llm' | 'demo-heuristic'
+  model            String
+  answerSource     String // 'original' | 'edited'
+  answerText       String
+  trigger          String // 'auto' | 'retry' | 'reevaluate'
+  createdAt        DateTime
+  interview        Interview @relation(fields: [interviewId], references: [id], onDelete: Cascade)
+
+  @@index([interviewId, questionId, createdAt])
+}
+
+/// Append-only history of interviewer score overrides (finalScore null = override removed).
+model ScoreOverride {
+  id           String    @id
+  interviewId  String
+  questionId   String
+  aiScore      Int
+  finalScore   Int?
+  reason       String
+  overriddenBy String
+  createdAt    DateTime
+  interview    Interview @relation(fields: [interviewId], references: [id], onDelete: Cascade)
+
+  @@index([interviewId, questionId])
+}
+
+/// Private interviewer notes: one general note per interview, one per question.
+model InterviewerNote {
+  id          String    @id // `${interviewId}:general` or `${interviewId}:${questionId}`
+  interviewId String
+  questionId  String?
+  text        String
+  updatedAt   DateTime
+  interview   Interview @relation(fields: [interviewId], references: [id], onDelete: Cascade)
+
+  @@index([interviewId])
+}
+
+model ChatMessage {
+  id          String    @id
+  interviewId String
+  role        String
+  sender      String
+  content     String
+  timestamp   DateTime
+  interview   Interview @relation(fields: [interviewId], references: [id], onDelete: Cascade)
+
+  @@index([interviewId, timestamp])
+}
+
+/// Each generation is kept; the newest is the current report.
+model FinalReport {
+  id          String    @id
+  interviewId String
+  data        String // JSON InterviewReport
+  generatedAt DateTime
+  interview   Interview @relation(fields: [interviewId], references: [id], onDelete: Cascade)
+
+  @@index([interviewId, generatedAt])
+}

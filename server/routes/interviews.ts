@@ -146,7 +146,7 @@ export function createInterviewRouter({ config, sessions, auth, reports }: Deps)
     }
     try {
       const user = await auth.signup(req.body?.email, req.body?.password, req.body?.name);
-      auth.startSession(res, user);
+      await auth.startSession(res, user);
       console.log(`[auth] Account created ${user.id}`);
       res.status(201).json({ user: auth.toPublic(user) });
     } catch (err) {
@@ -162,7 +162,7 @@ export function createInterviewRouter({ config, sessions, auth, reports }: Deps)
     }
     try {
       const user = await auth.login(req.body?.email, req.body?.password);
-      auth.startSession(res, user);
+      await auth.startSession(res, user);
       res.json({ user: auth.toPublic(user) });
     } catch (err) {
       const status = err instanceof AuthError ? err.status : 500;
@@ -170,8 +170,8 @@ export function createInterviewRouter({ config, sessions, auth, reports }: Deps)
     }
   });
 
-  router.post('/api/auth/logout', (req, res) => {
-    auth.endSession(req, res);
+  router.post('/api/auth/logout', async (req, res) => {
+    await auth.endSession(req, res);
     res.json({ ok: true });
   });
 

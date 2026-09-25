@@ -18,6 +18,8 @@ import { EvaluationService } from './services/evaluationService';
 import { QuestionFlow } from './services/questionFlow';
 import { AuthService } from './services/authService';
 import { ReportService } from './services/reportService';
+import { getPrisma, assertDatabaseReady } from './db/prisma';
+import { InterviewRepository } from './db/interviewRepository';
 import { createInterviewRouter } from './routes/interviews';
 import type { WSMessage, StreamChunk, TranscriptEntry, SessionState } from './types';
 
@@ -85,10 +87,10 @@ function sendToSession(sessionId: string, msg: ChatOutbound): void {
   });
 }
 
-const sessions = new SessionManager();
-const restored = sessions.loadPersisted();
-if (restored) console.log(`[store] Restored ${restored} interview(s)`);
-const auth = new AuthService(Boolean(config.publicBaseUrl?.startsWith('https://')));
+const prisma = getPrisma();
+const sessions = new SessionManager(config.answerSilenceSeconds);
+const interviews = new InterviewRepository(prisma);
+const auth = new AuthService(prisma, Boolean(config.publicBaseUrl?.startsWith('https://')));
 const llmService = new LLMService(llm);
 const chatHandler = new ChatHandler(sessions, llmService, sendToSession, !config.isProduction);
 /** Role-scoped delivery: evaluation data only ever goes to interviewer connections. */
@@ -518,7 +520,27 @@ function handleCandidateControl(msg: WSMessage): void {
 
 // --- Boot ---
 
-function boot(): void {
+async function boot(): Promise<void> {
+  await assertDatabaseReady(prisma);
+  await auth.init();
+  const loaded = await interviews.loadAll();
+  sessions.restore(loaded);
+  const live = loaded.filter((s) => s.status === 'LIVE').length;
+  console.log(`[db] Restored ${loaded.length} interview(s)${live ? `, ${live} still LIVE` : ''}`);
+  interviews.start(() => sessions.persistable());
+
+  // Flush pending writes before exiting.
+  let stopping = false;
+  for (const sig of ['SIGINT', 'SIGTERM'] as const) {
+    process.on(sig, async () => {
+      if (stopping) return;
+      stopping = true;
+      await interviews.stop(sessions.persistable());
+      await prisma.$disconnect();
+      process.exit(0);
+    });
+  }
+
   server.listen(config.port, () => {
     console.log(`\n[server] InterviewAI server running on http://localhost:${config.port}`);
     console.log(`[server] Mode: ${config.demoMode ? 'DEMO (no API keys)' : 'LIVE'}`);
@@ -528,4 +550,7 @@ function boot(): void {
   });
 }
 
-boot();
+boot().catch((err) => {
+  console.error(`[server] Failed to start: ${(err as Error).message}`);
+  process.exit(1);
+});

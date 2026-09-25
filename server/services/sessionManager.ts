@@ -1,7 +1,6 @@
-import { randomBytes, timingSafeEqual } from 'crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'crypto';
 import type { Difficulty, InterviewQuestion, TranscriptSegment } from './evaluationTypes';
 import type { InterviewReport, InterviewerReview, PlannedQuestion, ReportStatus } from './reportTypes';
-import { JsonStore } from './jsonStore';
 
 export type ParticipantRole = 'candidate' | 'interviewer';
 
@@ -28,11 +27,20 @@ const TRANSITIONS: Record<InterviewStatus, InterviewStatus[]> = {
   CANCELLED: [],
 };
 
-type Participant = {
+export type Participant = {
   role: ParticipantRole;
   name: string;
-  connected: number; // open WebSocket connections bound to this participant
+  createdAt: number;
+  connected: number; // open WebSocket connections bound to this participant (runtime only)
 };
+
+export type InterviewSettings = {
+  autoEndOnSilence: boolean; // end the answer automatically after candidate silence
+  silenceSeconds: number;
+};
+
+/** Only a hash of each participant key is kept (in memory and in the database). */
+export const hashKey = (key: string) => createHash('sha256').update(key).digest('hex');
 
 export type InterviewDetails = {
   ownerId: string | null; // interviewer account; null for legacy desktop-app rooms
@@ -54,7 +62,8 @@ export type InterviewSession = {
   details: InterviewDetails;
   // Secret embedded in the candidate's invite link. Interviewers authenticate by account.
   candidateKey: string;
-  participants: Map<string, Participant>; // keyed by participantKey (per-connection secret)
+  participants: Map<string, Participant>; // keyed by hash of the per-connection participantKey
+  settings: InterviewSettings;
   messages: ChatEntry[];
   pending: boolean; // a chat LLM request is in flight for this session
   questions: InterviewQuestion[];
@@ -74,7 +83,7 @@ export type InterviewSession = {
 
 export type ParticipantBinding = {
   sessionId: string;
-  participantKey: string;
+  participantId: string; // hash of the participantKey
   role: ParticipantRole;
 };
 
@@ -126,24 +135,35 @@ export class SessionManager {
   private timers = new Map<string, ReturnType<typeof setTimeout>>();
   private onTimeUp: ((session: InterviewSession) => void) | null = null;
 
-  constructor() {
+  constructor(private readonly defaultSilenceSeconds = 5) {
     setInterval(() => this.evictIdle(), 10 * 60 * 1000).unref();
   }
 
-  private readonly store = new JsonStore<{ interviews: SerializedSession[] }>('interviews', () => ({
-    interviews: [...this.sessions.values()].filter((s) => s.details.ownerId).map(serialize),
-  }));
-
-  /** Restores persisted interviews (owned ones only; legacy rooms are ephemeral). */
-  loadPersisted(): number {
-    const saved = this.store.load();
-    for (const raw of saved?.interviews ?? []) {
-      const session = deserialize(raw);
+  /**
+   * Restores interviews loaded from the database. A LIVE interview keeps
+   * running: its remaining time is derived from the stored elapsed time and the
+   * start of the current LIVE stretch, and the time-up timer is rescheduled.
+   */
+  restore(loaded: InterviewSession[]): void {
+    for (const session of loaded) {
+      for (const p of session.participants.values()) p.connected = 0;
+      session.pending = false;
+      for (const q of session.questions) {
+        if (q.status === 'evaluating') {
+          q.status = 'error';
+          q.evaluationError = 'AI evaluation temporarily unavailable.';
+        }
+      }
+      if (session.reportStatus === 'generating') session.reportStatus = 'failed';
       this.sessions.set(session.id, session);
       this.roomIndex.set(session.roomName, session.id);
+      this.scheduleTimeUp(session);
     }
-    this.store.autosave();
-    return saved?.interviews.length ?? 0;
+  }
+
+  /** Owned interviews, for persistence. Legacy desktop-app rooms are ephemeral. */
+  persistable(): InterviewSession[] {
+    return [...this.sessions.values()].filter((s) => s.details.ownerId);
   }
 
   listByOwner(ownerId: string): InterviewSession[] {
@@ -188,6 +208,7 @@ export class SessionManager {
       status: 'CREATED',
       details,
       candidateKey: secureId(24),
+      settings: { autoEndOnSilence: false, silenceSeconds: this.defaultSilenceSeconds },
       participants: new Map(),
       messages: [],
       pending: false,
@@ -226,22 +247,23 @@ export class SessionManager {
   addParticipant(sessionId: string, role: ParticipantRole, name: string): string {
     const session = this.require(sessionId);
     const participantKey = secureId(24);
-    session.participants.set(participantKey, { role, name, connected: 0 });
+    session.participants.set(hashKey(participantKey), { role, name, createdAt: Date.now(), connected: 0 });
     return participantKey;
   }
 
   /** Validates a WebSocket join; returns null if the session or key is unknown. */
   authenticate(sessionId: string, participantKey: string): ParticipantBinding | null {
     const session = this.sessions.get(sessionId);
-    const participant = session?.participants.get(participantKey);
+    const participantId = hashKey(participantKey);
+    const participant = session?.participants.get(participantId);
     if (!session || !participant) return null;
-    return { sessionId, participantKey, role: participant.role };
+    return { sessionId, participantId, role: participant.role };
   }
 
   /** Returns true when this changed whether the role has any live connection. */
   markConnected(binding: ParticipantBinding, delta: 1 | -1): boolean {
     const session = this.sessions.get(binding.sessionId);
-    const participant = session?.participants.get(binding.participantKey);
+    const participant = session?.participants.get(binding.participantId);
     if (!session || !participant) return false;
     const before = this.roleConnected(session, binding.role);
     participant.connected = Math.max(0, participant.connected + delta);
@@ -367,40 +389,4 @@ export class SessionManager {
       }
     }
   }
-}
-
-// --- Persistence (runtime-only state is reset on load) ---
-
-type SerializedSession = Omit<InterviewSession, 'participants' | 'pending'> & {
-  participants: [string, Participant][];
-};
-
-function serialize(session: InterviewSession): SerializedSession {
-  const { participants, pending: _pending, ...rest } = session;
-  return {
-    ...rest,
-    participants: [...participants.entries()].map(([k, p]) => [k, { ...p, connected: 0 }]),
-  };
-}
-
-function deserialize(raw: SerializedSession): InterviewSession {
-  const session: InterviewSession = {
-    ...raw,
-    participants: new Map(raw.participants),
-    pending: false,
-  };
-  // The server was down: a running interview resumes paused, with the time
-  // elapsed up to the last save preserved.
-  if (session.liveSince !== null) {
-    session.liveSince = null;
-    session.status = 'PAUSED';
-  }
-  for (const q of session.questions) {
-    if (q.status === 'evaluating') {
-      q.status = 'error';
-      q.evaluationError = 'AI evaluation temporarily unavailable.';
-    }
-  }
-  if (session.reportStatus === 'generating') session.reportStatus = 'failed';
-  return session;
 }

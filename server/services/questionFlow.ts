@@ -1,7 +1,7 @@
 import { randomBytes } from 'crypto';
 import { DeepgramStreamingService } from './deepgramSTT';
 import { EvaluationError, type EvaluationService } from './evaluationService';
-import type { Difficulty, InterviewQuestion, Rubric } from './evaluationTypes';
+import type { Difficulty, Evaluation, InterviewQuestion, Rubric, TranscriptSegment } from './evaluationTypes';
 import type { InterviewSession, ParticipantBinding, ParticipantRole, SessionManager } from './sessionManager';
 import type { TranscriptEntry } from '../types';
 
@@ -25,6 +25,7 @@ const RUBRIC_WAIT_MS = 20_000;
 const MAX_NOTE_LENGTH = 4000;
 const UNAVAILABLE = 'AI evaluation temporarily unavailable.';
 const QUESTION_ID = /^q_\d{3}_[0-9a-f]{6}$/;
+const newId = (prefix: string) => `${prefix}_${randomBytes(8).toString('hex')}`;
 
 function clean(value: unknown, max: number): string {
   return typeof value === 'string' ? value.replace(/[\u0000-\u0008\u000B-\u001F\u007F]/g, '').trim().slice(0, max) : '';
@@ -134,14 +135,21 @@ export class QuestionFlow {
       skills: planned?.skills.length ? planned.skills : cleanList(msg.skills, 4),
       scoringCriteria: 'Correctness 40%, Completeness 25%, Relevance 15%, Technical depth 10%, Clarity 10%.',
       rubricSource: concepts.length ? 'interviewer' : 'none',
+      plannedQuestionId: planned?.id ?? null,
       askedAt: Date.now(),
       answerStartedAt: null,
       answeredAt: null,
       answer: '',
+      editedAnswer: null,
+      editedBy: null,
+      editedAt: null,
+      lowConfidence: false,
       status: 'not_started',
       evaluation: null,
+      evaluationHistory: [],
       evaluationError: null,
       override: null,
+      overrideHistory: [],
       finalScore: null,
       interviewerNote: '',
     };
@@ -175,7 +183,7 @@ export class QuestionFlow {
       this.error(client, 'invalid_state', 'Only failed evaluations can be retried.');
       return;
     }
-    this.trackEvaluation(session, q);
+    this.trackEvaluation(session, q, 'retry');
   }
 
   handleOverride(client: QuestionFlowClient, msg: Record<string, unknown>): void {
@@ -187,6 +195,9 @@ export class QuestionFlow {
       return;
     }
     if (msg.score === null) {
+      if (q.override) {
+        q.overrideHistory.push({ ...q.override, id: newId('ov'), finalScore: null, overriddenAt: Date.now() });
+      }
       q.override = null;
       q.finalScore = q.evaluation.score;
     } else {
@@ -201,12 +212,14 @@ export class QuestionFlow {
         return;
       }
       q.override = {
+        id: newId('ov'),
         aiScore: q.evaluation.score,
         finalScore: score,
         overrideReason: reason,
         overriddenBy: session.details.interviewerName,
         overriddenAt: Date.now(),
       };
+      q.overrideHistory.push(q.override);
       q.finalScore = score;
     }
     console.log(`[EVAL] ${q.questionId} override → ${q.finalScore} (AI ${q.evaluation.score})`);
@@ -308,13 +321,17 @@ export class QuestionFlow {
       return;
     }
 
-    const segment = {
-      id: randomBytes(6).toString('hex'),
+    const segment: TranscriptSegment = {
+      id: newId('seg'),
       sessionId: session.id,
       questionId,
       speaker,
       text,
       timestamp: Date.now(),
+      source: 'manual',
+      avgLogprob: null,
+      noSpeechProb: null,
+      lowConfidence: false,
     };
     session.transcript.push(segment);
     if (session.transcript.length > 2000) session.transcript = session.transcript.slice(-2000);
@@ -360,9 +377,9 @@ export class QuestionFlow {
     this.trackEvaluation(session, q);
   }
 
-  private trackEvaluation(session: InterviewSession, q: InterviewQuestion): void {
+  private trackEvaluation(session: InterviewSession, q: InterviewQuestion, trigger: Evaluation['trigger'] = 'auto'): void {
     const jobs = this.evalJobs.get(session.id) ?? new Set<Promise<void>>();
-    const job: Promise<void> = this.runEvaluation(session, q).finally(() => jobs.delete(job));
+    const job: Promise<void> = this.runEvaluation(session, q, trigger).finally(() => jobs.delete(job));
     jobs.add(job);
     this.evalJobs.set(session.id, jobs);
   }
@@ -388,7 +405,7 @@ export class QuestionFlow {
     this.rubricJobs.set(key, job);
   }
 
-  private async runEvaluation(session: InterviewSession, q: InterviewQuestion): Promise<void> {
+  private async runEvaluation(session: InterviewSession, q: InterviewQuestion, trigger: Evaluation['trigger'] = 'auto'): Promise<void> {
     q.status = 'evaluating';
     q.evaluationError = null;
     this.send.toRole(session.id, 'interviewer', { type: 'evaluation_started', sessionId: session.id, questionId: q.questionId });
@@ -408,17 +425,23 @@ export class QuestionFlow {
         scoringCriteria: q.scoringCriteria,
         source: q.rubricSource,
       };
-      const evaluation = await this.evaluator.evaluateAnswer({
+      // An interviewer-corrected transcript takes precedence over the raw STT text.
+      const answerSource = q.editedAnswer !== null ? 'edited' : 'original';
+      const answerText = q.editedAnswer ?? q.answer;
+      const result = await this.evaluator.evaluateAnswer({
         questionId: q.questionId,
         questionText: q.questionText,
         rubric,
-        candidateAnswer: q.answer,
+        candidateAnswer: answerText,
         interviewContext: {
           position: session.details.position,
           questionNumber: q.index,
           previousQuestions: session.questions.filter((x) => x.index < q.index).slice(-3).map((x) => x.questionText),
         },
       });
+      // Append-only history: a re-evaluation adds a run, it never replaces one.
+      const evaluation: Evaluation = { ...result, id: newId('ev'), answerSource, answerText, trigger };
+      q.evaluationHistory.push(evaluation);
       q.evaluation = evaluation;
       q.finalScore = q.override?.finalScore ?? evaluation.score;
       q.status = 'completed';

@@ -5,7 +5,7 @@ import {
   RUBRIC_WEIGHTS,
   type Breakdown,
   type Difficulty,
-  type Evaluation,
+  type EvaluationResult,
   type Rubric,
 } from './evaluationTypes';
 
@@ -145,7 +145,7 @@ function keywords(text: string): string[] {
  * Keyword-overlap scoring used only when no LLM key is configured. It is
  * labelled 'demo-heuristic' end to end and has deliberately low confidence.
  */
-function heuristicEvaluate(req: EvaluateRequest): Omit<Evaluation, 'questionId' | 'score' | 'evaluator' | 'model' | 'evaluatedAt'> {
+function heuristicEvaluate(req: EvaluateRequest): Omit<EvaluationResult, 'questionId' | 'score' | 'evaluator' | 'model' | 'evaluatedAt'> {
   const answerWords = new Set(keywords(req.candidateAnswer));
   const concepts = req.rubric.expectedConcepts;
   const covered: string[] = [];
@@ -204,7 +204,7 @@ export class EvaluationService {
     return { ...data, source: 'ai' };
   }
 
-  async evaluateAnswer(req: EvaluateRequest): Promise<Evaluation> {
+  async evaluateAnswer(req: EvaluateRequest): Promise<EvaluationResult> {
     const evaluatedAt = Date.now();
     if (this.demoMode) {
       const result = heuristicEvaluate(req);
