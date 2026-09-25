@@ -1,4 +1,5 @@
-import { LLMError, type AIProvider } from '../providers/ai';
+import type { LLMClient } from '../llm/llmClient';
+import { LLMError } from '../llm/errors';
 import type { InterviewQuestion } from './evaluationTypes';
 import type { InterviewReport, QuestionResult, SkillScore } from './reportTypes';
 import type { InterviewSession, SessionManager } from './sessionManager';
@@ -36,8 +37,7 @@ function dedupe(items: string[], max: number): string[] {
 export class ReportService {
   constructor(
     private readonly sessions: SessionManager,
-    private readonly provider: AIProvider,
-    private readonly timeoutMs: number,
+    private readonly llm: LLMClient,
     private readonly waitForEvaluations: (sessionId: string) => Promise<void>,
     private readonly notify: (session: InterviewSession) => void
   ) {}
@@ -129,7 +129,7 @@ export class ReportService {
   }
 
   private async summarize(session: InterviewSession, report: InterviewReport): Promise<{ text: string | null; status: InterviewReport['aiSummaryStatus'] }> {
-    if (this.provider.name === 'mock-ai') return { text: null, status: 'demo' };
+    if (this.llm.demoMode) return { text: null, status: 'demo' };
     const evaluated = session.questions.filter((q) => q.evaluation);
     if (!evaluated.length) return { text: null, status: 'unavailable' };
 
@@ -144,9 +144,9 @@ export class ReportService {
       + `Average score: ${report.averageFinalScore}/100\n\n${lines.join('\n\n')}`;
 
     try {
-      const text = await this.provider.chat(
+      const { text } = await this.llm.complete(
         [{ role: 'system', content: SUMMARY_PROMPT }, { role: 'user', content: user }],
-        { timeoutMs: this.timeoutMs, maxTokens: 350, temperature: 0.3 }
+        { purpose: 'report-summary', maxTokens: 900, temperature: 0.3 }
       );
       return { text: text.trim().slice(0, 1500), status: 'generated' };
     } catch (err) {

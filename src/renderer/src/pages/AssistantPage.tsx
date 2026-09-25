@@ -94,7 +94,7 @@ export function AssistantPage() {
           useInterviewStore.getState().setConnectionMode(p.demoMode ? 'demo' : 'live');
           useInterviewStore.getState().setDemoMode(p.demoMode);
           useInterviewStore.getState().setAudioStatus({
-            ai: p.ai === 'openai' ? 'connected' : 'demo',
+            ai: p.ai && p.ai !== 'mock' ? 'connected' : 'demo',
           });
           break;
         }

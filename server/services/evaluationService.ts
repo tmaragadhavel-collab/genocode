@@ -1,4 +1,6 @@
-import { LLMError, type AIProvider, type LLMMessage } from '../providers/ai';
+import { z } from 'zod';
+import type { ChatMessage, LLMClient } from '../llm/llmClient';
+import { LLMError } from '../llm/errors';
 import {
   RUBRIC_WEIGHTS,
   type Breakdown,
@@ -76,79 +78,54 @@ Given a question and the role being interviewed for, respond with one JSON objec
   "scoringCriteria": "one sentence on what distinguishes a strong answer"
 }`;
 
-// --- Validation helpers ---
+// --- Validation (zod) ---
 
-function stringList(value: unknown, max = 10): string[] {
-  if (value === undefined || value === null) return [];
-  if (!Array.isArray(value)) throw new EvaluationError('invalid_response', 'expected an array of strings');
-  return value
-    .filter((v): v is string => typeof v === 'string')
-    .map((v) => v.replace(/\s+/g, ' ').trim().slice(0, 240))
-    .filter(Boolean)
-    .slice(0, max);
-}
+// Sub-scores must be numbers 0-100; numeric strings like "85" are accepted.
+const subScore = z.union([z.number(), z.string().regex(/^\s*\d+(\.\d+)?\s*$/).transform(Number)])
+  .pipe(z.number().finite().min(0).max(100))
+  .transform((n) => Math.round(n));
 
-function parseJSON(text: string): Record<string, unknown> {
-  // Tolerate a fenced block even in JSON mode.
-  const body = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/```$/, '');
-  let value: unknown;
-  try {
-    value = JSON.parse(body);
-  } catch {
-    throw new EvaluationError('invalid_response', 'LLM did not return valid JSON');
-  }
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new EvaluationError('invalid_response', 'LLM JSON is not an object');
-  }
-  return value as Record<string, unknown>;
-}
+const textList = (max: number) => z.array(z.unknown()).default([]).transform((items) => items
+  .filter((v): v is string => typeof v === 'string')
+  .map((v) => v.replace(/\s+/g, ' ').trim().slice(0, 240))
+  .filter(Boolean)
+  .slice(0, max));
+
+/**
+ * What the evaluator LLM may return. Only the five sub-scores are read: any
+ * total/score field it adds is stripped, and the backend computes the weighted score.
+ */
+export const EvaluationSchema = z.object({
+  breakdown: z.object({
+    correctness: subScore,
+    completeness: subScore,
+    relevance: subScore,
+    technicalDepth: subScore,
+    clarity: subScore,
+  }),
+  coveredConcepts: textList(10),
+  missingConcepts: textList(10),
+  factualErrors: textList(6),
+  strengths: textList(6),
+  improvements: textList(6),
+  confidence: z.number().finite().min(0).max(1).transform((c) => Math.round(c * 100) / 100),
+  followUpQuestion: z.string().nullish().transform((f) => {
+    const t = (f ?? '').trim().slice(0, 300);
+    return t && t.toLowerCase() !== 'null' ? t : null;
+  }),
+});
+
+const RubricSchema = z.object({
+  expectedAnswer: z.string().default('').transform((t) => t.trim().slice(0, 1500)),
+  expectedConcepts: textList(8).refine((l) => l.length > 0, 'at least one expected concept is required'),
+  difficulty: z.enum(['easy', 'medium', 'hard']).catch('medium'),
+  skills: textList(4),
+  scoringCriteria: z.string().default('').transform((t) => t.trim().slice(0, 300)),
+});
 
 export function computeScore(b: Breakdown): number {
   const total = DIMENSIONS.reduce((sum, d) => sum + b[d] * RUBRIC_WEIGHTS[d], 0);
   return Math.round(total);
-}
-
-/** Validates the evaluator's JSON; throws EvaluationError('invalid_response') if malformed. */
-export function validateEvaluation(raw: Record<string, unknown>): Omit<Evaluation, 'questionId' | 'score' | 'evaluator' | 'model' | 'evaluatedAt'> {
-  const b = raw.breakdown as Record<string, unknown> | undefined;
-  if (!b || typeof b !== 'object') throw new EvaluationError('invalid_response', 'missing breakdown');
-  const breakdown = {} as Breakdown;
-  for (const d of DIMENSIONS) {
-    const v = b[d];
-    if (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 100) {
-      throw new EvaluationError('invalid_response', `breakdown.${d} must be a number 0-100`);
-    }
-    breakdown[d] = Math.round(v);
-  }
-  const confidence = raw.confidence;
-  if (typeof confidence !== 'number' || !Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
-    throw new EvaluationError('invalid_response', 'confidence must be a number 0-1');
-  }
-  const follow = typeof raw.followUpQuestion === 'string' ? raw.followUpQuestion.trim().slice(0, 300) : '';
-  return {
-    breakdown,
-    coveredConcepts: stringList(raw.coveredConcepts),
-    missingConcepts: stringList(raw.missingConcepts),
-    factualErrors: stringList(raw.factualErrors, 6),
-    strengths: stringList(raw.strengths, 6),
-    improvements: stringList(raw.improvements, 6),
-    confidence: Math.round(confidence * 100) / 100,
-    followUpQuestion: follow && follow.toLowerCase() !== 'null' ? follow : null,
-  };
-}
-
-function validateRubric(raw: Record<string, unknown>): Rubric {
-  const expectedConcepts = stringList(raw.expectedConcepts, 8);
-  if (expectedConcepts.length === 0) throw new EvaluationError('invalid_response', 'rubric has no concepts');
-  const difficulty = ['easy', 'medium', 'hard'].includes(raw.difficulty as string) ? raw.difficulty as Difficulty : 'medium';
-  return {
-    expectedAnswer: typeof raw.expectedAnswer === 'string' ? raw.expectedAnswer.trim().slice(0, 1500) : '',
-    expectedConcepts,
-    difficulty,
-    skills: stringList(raw.skills, 4),
-    scoringCriteria: typeof raw.scoringCriteria === 'string' ? raw.scoringCriteria.trim().slice(0, 300) : '',
-    source: 'ai',
-  };
 }
 
 // --- Demo scorer (no API key) ---
@@ -208,14 +185,10 @@ function heuristicEvaluate(req: EvaluateRequest): Omit<Evaluation, 'questionId' 
 // --- Service ---
 
 export class EvaluationService {
-  constructor(
-    private readonly provider: AIProvider,
-    private readonly model: string,
-    private readonly timeoutMs: number
-  ) {}
+  constructor(private readonly llm: LLMClient) {}
 
   get demoMode(): boolean {
-    return this.provider.name === 'mock-ai';
+    return this.llm.demoMode;
   }
 
   /** Builds a rubric for a question the interviewer didn't supply one for. */
@@ -223,12 +196,12 @@ export class EvaluationService {
     if (this.demoMode) {
       return { expectedAnswer: '', expectedConcepts: [], difficulty: 'medium', skills: [], scoringCriteria: '', source: 'none' };
     }
-    const messages: LLMMessage[] = [
+    const messages: ChatMessage[] = [
       { role: 'system', content: RUBRIC_PROMPT },
       { role: 'user', content: `Role: ${position}\nQuestion: ${questionText}\nReturn the JSON rubric.` },
     ];
-    const text = await this.callLLM(messages, 500);
-    return validateRubric(parseJSON(text));
+    const { data } = await this.call(RubricSchema, messages, 'rubric', 1200);
+    return { ...data, source: 'ai' };
   }
 
   async evaluateAnswer(req: EvaluateRequest): Promise<Evaluation> {
@@ -248,29 +221,24 @@ export class EvaluationService {
       `INTERVIEW CONTEXT:\nRole: ${ctx.position}\nQuestion number: ${ctx.questionNumber}${ctx.previousQuestions.length ? `\nEarlier questions: ${ctx.previousQuestions.join(' | ')}` : ''}`,
       'Return the JSON evaluation.',
     ].join('\n\n');
-    const messages: LLMMessage[] = [
+    const messages: ChatMessage[] = [
       { role: 'system', content: EVALUATOR_PROMPT },
       { role: 'user', content: user },
     ];
-
-    // One retry for a malformed response; provider errors are not retried here.
-    let lastError: unknown;
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      const text = await this.callLLM(messages, 700);
-      try {
-        const result = validateEvaluation(parseJSON(text));
-        return { ...result, questionId: req.questionId, score: computeScore(result.breakdown), evaluator: 'llm', model: this.model, evaluatedAt };
-      } catch (err) {
-        lastError = err;
-        console.warn(`[EVAL] Invalid evaluator output (attempt ${attempt}): ${(err as Error).message}`);
-      }
-    }
-    throw lastError;
+    const { data, provider, model } = await this.call(EvaluationSchema, messages, 'evaluation', 1500);
+    return {
+      ...data,
+      questionId: req.questionId,
+      score: computeScore(data.breakdown), // never an LLM-computed total
+      evaluator: 'llm',
+      model: `${provider}:${model}`,
+      evaluatedAt,
+    };
   }
 
-  private async callLLM(messages: LLMMessage[], maxTokens: number): Promise<string> {
+  private async call<T>(schema: z.ZodType<T, z.ZodTypeDef, unknown>, messages: ChatMessage[], purpose: string, maxTokens: number) {
     try {
-      return await this.provider.chat(messages, { timeoutMs: this.timeoutMs, maxTokens, temperature: 0.2, json: true });
+      return await this.llm.completeJSON(schema, messages, { purpose, maxTokens, temperature: 0.2 });
     } catch (err) {
       if (err instanceof LLMError) throw new EvaluationError(err.code, err.message);
       throw new EvaluationError('provider', (err as Error).message);

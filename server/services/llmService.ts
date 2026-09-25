@@ -1,4 +1,5 @@
-import type { AIProvider, LLMMessage } from '../providers/ai';
+import type { ChatMessage, LLMClient } from '../llm/llmClient';
+import { demoChatReply } from '../llm/demo';
 import type { ChatEntry, ParticipantRole } from './sessionManager';
 
 // Server-side only. Clients can never supply or modify this prompt.
@@ -26,20 +27,17 @@ export type InterviewResponseRequest = {
   message: string;
 };
 
-function toLLMMessage(entry: ChatEntry): LLMMessage {
+function toLLMMessage(entry: ChatEntry): ChatMessage {
   if (entry.role === 'assistant') return { role: 'assistant', content: entry.content };
   const prefix = entry.sender === 'interviewer' ? '[Human interviewer] ' : '';
   return { role: 'user', content: prefix + entry.content };
 }
 
 export class LLMService {
-  constructor(
-    private readonly provider: AIProvider,
-    private readonly timeoutMs: number
-  ) {}
+  constructor(private readonly llm: LLMClient) {}
 
   get providerName(): string {
-    return this.provider.name;
+    return this.llm.describe;
   }
 
   /**
@@ -47,10 +45,12 @@ export class LLMService {
    * Only the most recent turns are sent to keep the request small.
    */
   async generateInterviewResponse(req: InterviewResponseRequest): Promise<string> {
-    const messages: LLMMessage[] = [
+    if (this.llm.demoMode) return demoChatReply(req.message);
+    const messages: ChatMessage[] = [
       { role: 'system', content: INTERVIEWER_SYSTEM_PROMPT },
       ...req.conversation.slice(-MAX_HISTORY_MESSAGES).map(toLLMMessage),
     ];
-    return this.provider.chat(messages, { timeoutMs: this.timeoutMs, maxTokens: 400 });
+    const res = await this.llm.complete(messages, { purpose: 'chat', maxTokens: 800, temperature: 0.7 });
+    return res.text;
   }
 }

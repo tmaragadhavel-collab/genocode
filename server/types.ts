@@ -98,14 +98,21 @@ export type SessionState =
   | 'waiting_for_next_question'
   | 'error';
 
+export type SttConfig = {
+  provider: 'groq' | 'deepgram' | 'none';
+  apiKey: string;
+  model: string;
+  baseURL: string;
+};
+
 export type ServerConfig = {
   port: number;
-  deepgramKey: string | null;
-  aiApiKey: string | null;
-  aiModel: string;
-  aiTimeoutMs: number;
   isProduction: boolean;
   publicBaseUrl: string | null;
+  databaseUrl: string;
+  stt: SttConfig;
+  deepgramKey: string | null;
+  answerSilenceSeconds: number;
   demoMode: boolean;
   livekitUrl: string | null;
   livekitApiKey: string | null;

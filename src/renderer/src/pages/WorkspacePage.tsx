@@ -412,7 +412,7 @@ export function WorkspacePage() {
           const p = msg.payload as any;
           store.setConnectionMode(p.demoMode ? 'demo' : 'live');
           store.setDemoMode(p.demoMode);
-          store.setAudioStatus({ ai: p.ai === 'openai' ? 'connected' : 'demo' });
+          store.setAudioStatus({ ai: p.ai && p.ai !== 'mock' ? 'connected' : 'demo' });
           break;
         }
         case 'session_state': {

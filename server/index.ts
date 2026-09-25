@@ -5,7 +5,9 @@ import path from 'path';
 import { WebSocketServer, WebSocket } from 'ws';
 import { AccessToken } from 'livekit-server-sdk';
 import { loadConfig } from './config';
-import { createAIProvider } from './providers/ai';
+import { LLMClient } from './llm/llmClient';
+import { loadLLMConfig } from './llm/config';
+import { generateAssistantStream } from './llm/assistantStream';
 import { DeepgramStreamingService } from './services/deepgramSTT';
 import { ConversationEngine } from './services/conversationEngine';
 import { SessionManager, type ParticipantRole } from './services/sessionManager';
@@ -37,7 +39,9 @@ let candidateAudioCount = 0;
 let audioDropWarned = false;
 
 const conversationEngine = new ConversationEngine();
-const aiProvider = createAIProvider(config.aiApiKey, config.aiModel);
+// The single LLM client used by chat, evaluation, follow-ups, reports and the live assistant.
+const llm = new LLMClient(loadLLMConfig());
+console.log(`[LLM] ${llm.describe}`);
 
 // --- Per-connection state ---
 
@@ -85,7 +89,7 @@ const sessions = new SessionManager();
 const restored = sessions.loadPersisted();
 if (restored) console.log(`[store] Restored ${restored} interview(s)`);
 const auth = new AuthService(Boolean(config.publicBaseUrl?.startsWith('https://')));
-const llmService = new LLMService(aiProvider, config.aiTimeoutMs);
+const llmService = new LLMService(llm);
 const chatHandler = new ChatHandler(sessions, llmService, sendToSession, !config.isProduction);
 /** Role-scoped delivery: evaluation data only ever goes to interviewer connections. */
 function sendToRole(sessionId: string, role: ParticipantRole, msg: ChatOutbound): void {
@@ -99,7 +103,7 @@ function sendToRole(sessionId: string, role: ParticipantRole, msg: ChatOutbound)
   });
 }
 
-const evaluator = new EvaluationService(aiProvider, config.aiModel, config.aiTimeoutMs);
+const evaluator = new EvaluationService(llm);
 const questionFlow = new QuestionFlow(
   sessions,
   evaluator,
@@ -108,8 +112,7 @@ const questionFlow = new QuestionFlow(
 );
 const reports = new ReportService(
   sessions,
-  aiProvider,
-  config.aiTimeoutMs,
+  llm,
   (sessionId) => questionFlow.waitForEvaluations(sessionId),
   (session) => sendToRole(session.id, 'interviewer', { type: 'report_status', sessionId: session.id, reportStatus: session.reportStatus })
 );
@@ -148,7 +151,7 @@ function broadcastAudioStatus(): void {
       systemAudio: sttService?.isInterviewerConnected() ? 'connected' : 'disconnected',
       microphone: sttService?.isCandidateConnected() ? 'connected' : 'disconnected',
       stt: config.deepgramKey ? (sttService ? 'connected' : 'disconnected') : 'disconnected',
-      ai: config.aiApiKey ? 'connected' : (config.demoMode ? 'demo' : 'disconnected'),
+      ai: llm.demoMode ? 'demo' : 'connected',
     },
     timestamp: now(),
   });
@@ -163,7 +166,7 @@ app.get('/health', (_req, res) => {
     mode: config.demoMode ? 'demo' : 'live',
     providers: {
       stt: config.deepgramKey ? 'deepgram' : 'none',
-      ai: config.aiApiKey ? 'openai' : 'mock',
+      ai: llm.demoMode ? 'mock' : llm.primaryModel,
       livekit: config.livekitUrl ? 'configured' : 'none',
     },
     session: sessionState,
@@ -280,7 +283,7 @@ async function triggerAI(): Promise<void> {
 
   try {
     setSessionState('ai_streaming');
-    await aiProvider.generateStream(context, (chunk: StreamChunk) => {
+    await generateAssistantStream(llm, context, (chunk: StreamChunk) => {
       broadcast({
         type: 'assistant_stream',
         payload: chunk,
@@ -455,7 +458,7 @@ function sendCandidateGreeting(ws: WebSocket): void {
       state: config.demoMode ? 'demo' : 'live',
       demoMode: config.demoMode,
       stt: config.deepgramKey ? 'deepgram' : 'none',
-      ai: config.aiApiKey ? 'openai' : 'mock',
+      ai: llm.demoMode ? 'mock' : llm.primaryModel,
       livekit: config.livekitUrl ? 'configured' : 'none',
       sessionState,
     },

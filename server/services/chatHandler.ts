@@ -1,4 +1,4 @@
-import { LLMError } from '../providers/ai';
+import { LLMError } from '../llm/errors';
 import type { LLMService } from './llmService';
 import { SESSION_ID_PATTERN, type ParticipantBinding, type SessionManager } from './sessionManager';
 
