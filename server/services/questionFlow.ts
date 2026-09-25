@@ -4,6 +4,7 @@ import { EvaluationError, type EvaluationService } from './evaluationService';
 import type { Difficulty, Evaluation, InterviewQuestion, Rubric, TranscriptSegment } from './evaluationTypes';
 import type { InterviewSession, ParticipantBinding, ParticipantRole, SessionManager } from './sessionManager';
 import type { SttConfig, TranscriptEntry } from '../types';
+import type { PlannedQuestion } from './reportTypes';
 import { WhisperSTT, pcm16ToWav, SAMPLE_RATE, SttError } from '../stt/whisper';
 
 type Outbound = { type: string; sessionId?: string; [key: string]: unknown };
@@ -49,6 +50,13 @@ function cleanList(value: unknown, max = 10): string[] {
   return items.map((v) => clean(v, 120)).filter(Boolean).slice(0, max);
 }
 
+// Heuristic: does an interviewer utterance look like a new question?
+const QUESTION_START = /^(what|why|how|when|where|which|who|whose|can you|could you|would you|will you|do you|did you|have you|is there|are there|is it|explain|describe|tell me|walk me|give me|compare|let's talk|how about|what about)\b/i;
+export function looksLikeQuestion(text: string): boolean {
+  const t = text.trim();
+  return t.split(/\s+/).length >= 4 && (t.endsWith('?') || QUESTION_START.test(t));
+}
+
 /** What the candidate may see about a question: never the rubric or evaluation. */
 function publicQuestion(q: InterviewQuestion) {
   return { questionId: q.questionId, index: q.index, questionText: q.questionText };
@@ -67,7 +75,9 @@ export class QuestionFlow {
   private sttWarned = new Set<string>();
   private readonly whisper: WhisperSTT | null;
   private segmentQueues = new Map<string, { chain: Promise<void>; size: number }>(); // per participant
-  private transcriptionDown = new Set<string>(); // sessions currently told "Transcription unavailable"
+  private transcriptionDown = new Set<string>();
+  // Answer-boundary assistance, per session.
+  private candidateActivity = new Map<string, { speaking: boolean; lastAt: number; prompted: boolean }>(); // sessions currently told "Transcription unavailable"
 
   constructor(
     private readonly sessions: SessionManager,
@@ -76,6 +86,7 @@ export class QuestionFlow {
     private readonly sttConfig: SttConfig
   ) {
     this.whisper = sttConfig.provider === 'groq' ? new WhisperSTT(sttConfig) : null;
+    setInterval(() => this.checkSilence(), 1000).unref();
   }
 
   /** How browsers should capture audio: VAD segments (Whisper), a PCM stream (Deepgram), or not at all. */
@@ -91,6 +102,7 @@ export class QuestionFlow {
         questions: session.questions,
         currentQuestionId: session.currentQuestionId,
         plannedQuestions: session.details.plannedQuestions,
+        settings: session.settings,
         generalNotes: session.generalNotes,
         transcript: session.transcript.slice(-100),
         evaluator: this.evaluator.demoMode ? 'demo-heuristic' : 'llm',
@@ -142,7 +154,10 @@ export class QuestionFlow {
       this.error(client, 'no_question', 'Type the question, or ask it aloud first so it is transcribed.');
       return;
     }
+    this.startQuestion(session, questionText, msg, planned);
+  }
 
+  private startQuestion(session: InterviewSession, questionText: string, msg: Record<string, unknown>, planned?: PlannedQuestion): void {
     const current = this.current(session);
     if (current) this.finishQuestion(session, current, 'next_question');
 
@@ -271,6 +286,84 @@ export class QuestionFlow {
     this.send.toRole(session.id, 'interviewer', { type: 'notes_updated', sessionId: session.id, questionId: q.questionId, text });
   }
 
+  /** Interviewer setting: auto-end the answer after candidate silence (default off). */
+  handleSettings(client: QuestionFlowClient, msg: Record<string, unknown>): void {
+    const session = this.interviewerSession(client);
+    if (!session) return;
+    if (msg.autoEndOnSilence !== undefined) {
+      if (typeof msg.autoEndOnSilence !== 'boolean') {
+        this.error(client, 'invalid_settings', 'autoEndOnSilence must be true or false.');
+        return;
+      }
+      session.settings.autoEndOnSilence = msg.autoEndOnSilence;
+    }
+    if (msg.silenceSeconds !== undefined) {
+      const n = Number(msg.silenceSeconds);
+      if (!Number.isInteger(n) || n < 2 || n > 60) {
+        this.error(client, 'invalid_settings', 'Silence must be a whole number of seconds from 2 to 60.');
+        return;
+      }
+      session.settings.silenceSeconds = n;
+    }
+    console.log(`[QUESTION] ${session.id} settings: auto-end ${session.settings.autoEndOnSilence ? 'on' : 'off'}, ${session.settings.silenceSeconds}s`);
+    this.send.toRole(session.id, 'interviewer', { type: 'settings_updated', sessionId: session.id, settings: session.settings });
+  }
+
+  // --- Answer-boundary assistance ---
+
+  /** speaking=null means "just produced speech" (a final transcript). */
+  private noteCandidateActivity(sessionId: string, speaking: boolean | null): void {
+    const a = this.candidateActivity.get(sessionId) ?? { speaking: false, lastAt: Date.now(), prompted: false };
+    if (speaking !== null) a.speaking = speaking;
+    a.lastAt = Date.now();
+    a.prompted = false; // new speech → a later silence may prompt again
+    this.candidateActivity.set(sessionId, a);
+  }
+
+  /**
+   * After the candidate has answered and then stayed silent for the configured
+   * time, either ask the interviewer to end the answer or (auto-end ON) end it.
+   * The interviewer's manual controls always remain authoritative.
+   */
+  private checkSilence(): void {
+    const now = Date.now();
+    for (const [sessionId, a] of this.candidateActivity) {
+      const session = this.sessions.get(sessionId);
+      const q = session && this.current(session);
+      if (!session || !q || session.status !== 'LIVE') {
+        this.candidateActivity.delete(sessionId);
+        continue;
+      }
+      const silentMs = now - a.lastAt;
+      // A "speaking" flag with no update for 20s (segments are ≤15s) is stale, e.g. a dropped browser.
+      const speaking = a.speaking && silentMs < 20_000;
+      if (speaking || a.prompted || !q.answerStartedAt || silentMs < session.settings.silenceSeconds * 1000) continue;
+      a.prompted = true;
+      if (session.settings.autoEndOnSilence) {
+        console.log(`[QUESTION] ${q.questionId} auto-ended after ${Math.round(silentMs / 1000)}s of silence`);
+        this.send.toRole(sessionId, 'interviewer', { type: 'answer_auto_ended', sessionId, questionId: q.questionId, reason: 'silence' });
+        this.finishQuestion(session, q, 'auto_silence');
+      } else {
+        this.send.toRole(sessionId, 'interviewer', {
+          type: 'answer_silence_prompt', sessionId, questionId: q.questionId, silentSeconds: Math.round(silentMs / 1000),
+        });
+      }
+    }
+  }
+
+  /** The interviewer asked something new while an answered question is still open. */
+  private onSpokenQuestion(session: InterviewSession, open: InterviewQuestion, text: string): void {
+    if (session.settings.autoEndOnSilence) {
+      console.log(`[QUESTION] ${open.questionId} closed: interviewer asked a new question (auto-end on)`);
+      this.send.toRole(session.id, 'interviewer', { type: 'answer_auto_ended', sessionId: session.id, questionId: open.questionId, reason: 'new_question' });
+      this.startQuestion(session, text.slice(0, MAX_QUESTION_LENGTH), {});
+      return;
+    }
+    this.send.toRole(session.id, 'interviewer', {
+      type: 'new_question_detected', sessionId: session.id, openQuestionId: open.questionId, text: text.slice(0, MAX_QUESTION_LENGTH),
+    });
+  }
+
   /** Resolves once every evaluation running for the session has settled. */
   async waitForEvaluations(sessionId: string): Promise<void> {
     await Promise.allSettled([...(this.evalJobs.get(sessionId) ?? [])]);
@@ -360,6 +453,7 @@ export class QuestionFlow {
     const binding = client.binding;
     const session = binding ? this.sessions.get(binding.sessionId) : undefined;
     if (!binding || !session || session.status !== 'LIVE' || typeof msg.speaking !== 'boolean') return;
+    if (binding.role === 'candidate') this.noteCandidateActivity(session.id, msg.speaking);
     this.send.toSession(session.id, { type: 'speech_activity', sessionId: session.id, speaker: binding.role, speaking: msg.speaking });
   }
 
@@ -428,6 +522,11 @@ export class QuestionFlow {
     if (session.transcript.length > 2000) session.transcript = session.transcript.slice(-2000);
     this.send.toSession(session.id, { type: 'transcript_final', ...segment });
 
+    if (speaker === 'candidate') this.noteCandidateActivity(session.id, null);
+    if (speaker === 'interviewer' && current?.answerStartedAt && quality.source === 'stt' && looksLikeQuestion(text)) {
+      this.onSpokenQuestion(session, current, text);
+    }
+
     if (speaker === 'candidate' && current) {
       if (!current.answerStartedAt) {
         current.answerStartedAt = segment.timestamp;
@@ -457,6 +556,7 @@ export class QuestionFlow {
 
   private finishQuestion(session: InterviewSession, q: InterviewQuestion, reason: string): void {
     session.currentQuestionId = null;
+    this.candidateActivity.delete(session.id);
     q.answeredAt = Date.now();
     const hasAnswer = q.answer.trim().length > 0;
     console.log(`[QUESTION] ${q.questionId} ended (${reason}); answer ${hasAnswer ? `${q.answer.length} chars` : 'empty'}`);

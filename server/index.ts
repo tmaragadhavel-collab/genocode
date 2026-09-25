@@ -422,6 +422,9 @@ wss.on('connection', (ws, req) => {
         case 'note_save':
           questionFlow.handleNote(state, msg);
           break;
+        case 'interview_settings':
+          questionFlow.handleSettings(state, msg);
+          break;
 
         case 'ping': {
           state.send({ type: 'pong', serverNow: Date.now() });

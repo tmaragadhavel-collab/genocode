@@ -46,6 +46,8 @@ export function createEvaluationPanel({ sendWS, toast, isVisible, setBadge }) {
     transcription: 'unavailable',
     transcriptionOk: true,
     live: false,
+    settings: { autoEndOnSilence: false, silenceSeconds: 5 },
+    boundary: null, // { kind: 'silence' | 'newq', questionId, text? }
     unseen: 0,
   };
   let showEval = () => {};
@@ -67,9 +69,49 @@ export function createEvaluationPanel({ sendWS, toast, isVisible, setBadge }) {
     $('evalMode').hidden = st.evaluator !== 'demo-heuristic';
     if (!editingIn('questionBox')) renderQuestionBox();
     if (!editingIn('evalDetail')) renderDetail();
+    renderBoundary();
     renderFollowUp();
     renderHistory();
     renderPlanned();
+  }
+
+  // Answer-boundary suggestions. The interviewer always decides.
+  function renderBoundary() {
+    const box = $('boundaryBox');
+    const b = st.boundary;
+    if (!b || b.questionId !== st.currentId) {
+      box.hidden = true;
+      return;
+    }
+    box.hidden = false;
+    const dismiss = () => { st.boundary = null; renderBoundary(); };
+    if (b.kind === 'silence') {
+      box.replaceChildren(
+        h('h3', {}, 'Answer boundary'),
+        h('div', { className: 'qtext' }, 'Candidate seems done. End answer and evaluate?'),
+        h('div', { className: 'btn-row' },
+          h('button', { className: 'host-btn primary', type: 'button', onclick: () => { dismiss(); sendWS({ type: 'question_end' }); } }, 'End & Evaluate'),
+          h('button', { className: 'host-btn', type: 'button', onclick: dismiss }, 'Keep listening')));
+    } else {
+      box.replaceChildren(
+        h('h3', {}, 'New question detected'),
+        h('div', { className: 'qtext' }, `“${b.text}”`),
+        h('div', { className: 'score-sub' }, 'You seem to have asked a new question while the previous answer is still open.'),
+        h('div', { className: 'btn-row' },
+          h('button', { className: 'host-btn primary', type: 'button', onclick: () => { dismiss(); sendWS({ type: 'question_start', questionText: b.text }); } }, 'End previous & start this question'),
+          h('button', { className: 'host-btn', type: 'button', onclick: dismiss }, 'Dismiss')));
+    }
+  }
+
+  function autoEndControl() {
+    const s = st.settings;
+    return h('div', { className: 'setting-row' },
+      h('label', { className: 'setting-row' },
+        h('input', { type: 'checkbox', checked: s.autoEndOnSilence ? true : null, onchange: (e) => sendWS({ type: 'interview_settings', autoEndOnSilence: e.target.checked }) }),
+        'Auto-end answer after'),
+      h('select', { 'aria-label': 'Silence before ending the answer', onchange: (e) => sendWS({ type: 'interview_settings', silenceSeconds: Number(e.target.value) }) },
+        [3, 5, 8, 10, 15].map((n) => h('option', { value: String(n), selected: s.silenceSeconds === n ? true : null }, `${n}s`))),
+      h('span', {}, s.autoEndOnSilence ? 'of silence (on)' : 'of silence (off — you will be asked)'));
   }
 
   function renderQuestionBox() {
@@ -102,6 +144,7 @@ export function createEvaluationPanel({ sendWS, toast, isVisible, setBadge }) {
         manual,
         h('div', { className: 'btn-row' },
           h('button', { className: 'host-btn primary', type: 'button', disabled: !st.live, onclick: () => sendWS({ type: 'question_end' }) }, 'End question & evaluate')),
+        autoEndControl(),
       );
       answerBox.scrollTop = answerBox.scrollHeight;
       return;
@@ -356,6 +399,20 @@ export function createEvaluationPanel({ sendWS, toast, isVisible, setBadge }) {
         if (q) { q.status = 'error'; q.evaluationError = msg.message; notify(q); }
         break;
       }
+      case 'settings_updated':
+        st.settings = msg.settings;
+        break;
+      case 'answer_silence_prompt':
+        st.boundary = { kind: 'silence', questionId: msg.questionId };
+        if (!isVisible()) toast('Candidate seems done.', '', { label: 'End & Evaluate', run: () => sendWS({ type: 'question_end' }) });
+        break;
+      case 'new_question_detected':
+        st.boundary = { kind: 'newq', questionId: msg.openQuestionId, text: msg.text };
+        if (!isVisible()) toast('New question detected — end the previous answer?', '', { label: 'End & start', run: () => sendWS({ type: 'question_start', questionText: msg.text }) });
+        break;
+      case 'answer_auto_ended':
+        toast(msg.reason === 'silence' ? 'Answer ended after silence (auto-end is on)' : 'Previous answer ended: new question asked');
+        break;
       case 'notes_updated': {
         if (msg.questionId === null) {
           $('notesStatus').textContent = 'Saved.';
@@ -378,6 +435,7 @@ export function createEvaluationPanel({ sendWS, toast, isVisible, setBadge }) {
   function onJoined(msg) {
     st.questions = msg.questions || [];
     st.planned = msg.plannedQuestions || [];
+    st.settings = msg.settings || st.settings;
     st.currentId = msg.currentQuestionId || null;
     st.evaluator = msg.evaluator || 'llm';
     st.transcription = msg.transcription || 'unavailable';

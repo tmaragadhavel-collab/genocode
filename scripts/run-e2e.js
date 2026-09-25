@@ -43,7 +43,9 @@ const fakeWhisper = http.createServer((req, res) => {
     const low = whisperMode === 'low';
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
-      text: 'A process is an executing program and threads in the same process share memory.',
+      text: whisperMode === 'question'
+        ? 'Can you explain how virtual memory works?'
+        : 'A process is an executing program and threads in the same process share memory.',
       segments: [{ start: 0, end: 5, avg_logprob: low ? -1.3 : -0.15, no_speech_prob: low ? 0.2 : 0.01 }],
     }));
   });
@@ -90,6 +92,7 @@ async function suite(name, file, ...args) {
   await suite('workflow', 'workflow.e2e.js', 'main', state('workflow'));
   await suite('chat', 'chat.e2e.js');
   await suite('speech-to-text', 'stt.e2e.js', `http://127.0.0.1:${whisperPort}/control`);
+  await suite('answer boundaries', 'boundaries.e2e.js', `http://127.0.0.1:${whisperPort}/control`);
   await suite('restore (before crash)', 'restore.e2e.js', 'before', state('restore'));
   await killServer();
 

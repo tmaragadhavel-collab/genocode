@@ -242,6 +242,10 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 .eval-history .qs { font-variant-numeric: tabular-nums; font-weight: 600; }
 .eval-history .qs.pending { color: var(--muted); font-weight: 500; font-style: italic; }
 .linklike { color: var(--accent); text-decoration: underline; font-size: 12px; padding: 0; }
+.prompt { border: 1px solid rgba(242, 163, 58, 0.5); }
+.setting-row { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); flex-wrap: wrap; }
+.setting-row input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent); }
+.setting-row select { width: auto; padding: 4px 6px; }
 .followup { border: 1px solid rgba(139, 147, 255, 0.4); }
 .btn-row { display: flex; gap: 8px; flex-wrap: wrap; }
 .btn-row .host-btn { height: 32px; padding: 0 12px; }
