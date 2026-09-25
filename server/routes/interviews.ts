@@ -19,7 +19,7 @@ const WEB_DIR = path.join(process.cwd(), 'web');
 const LIVEKIT_CLIENT = path.join(process.cwd(), 'node_modules', 'livekit-client', 'dist', 'livekit-client.esm.mjs');
 const EMAIL_PATTERN = /^[^\s@]{1,64}@[^\s@]{1,190}\.[^\s@]{2,}$/;
 const QUESTION_ID = /^q_\d{3}_[0-9a-f]{6}$/;
-const ASSETS = new Set(['room.js', 'room.css', 'evaluation.js', 'report.js', 'pages.css']);
+const ASSETS = new Set(['room.js', 'room.css', 'evaluation.js', 'stt.js', 'report.js', 'pages.css']);
 const DIFFICULTIES: Difficulty[] = ['easy', 'medium', 'hard'];
 const DECISIONS: Decision[] = ['undecided', 'strong_hire', 'hire', 'no_hire', 'strong_no_hire'];
 

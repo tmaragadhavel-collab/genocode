@@ -6,6 +6,7 @@ import {
   DisconnectReason,
 } from '/vendor/livekit-client.esm.mjs';
 import { createEvaluationPanel } from './evaluation.js';
+import { createTranscriber } from './stt.js';
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -34,7 +35,8 @@ const state = {
   chatPending: false,
   chatSeen: new Set(),
   unreadChat: 0,
-  transcription: 'unavailable',
+  transcription: 'unavailable', // 'segments' | 'stream' | 'unavailable'
+  transcriptionOk: true,
   tab: null, // open side-panel tab, or null when closed
   transcriptSeen: new Set(),
   partial: { interviewer: '', candidate: '' },
@@ -42,6 +44,15 @@ const state = {
 
 // Interviewer-only AI evaluation module (the server never sends evaluation data to candidates).
 let evalPanel = null;
+
+// Both roles: our own microphone → server speech-to-text (speaker set server-side).
+const transcriber = createTranscriber({
+  sendWS: (msg) => sendWS(msg),
+  getMicTrack: () => {
+    const pub = state.room?.localParticipant?.getTrackPublication(Track.Source.Microphone);
+    return pub && !pub.isMuted && pub.track ? pub.track.mediaStreamTrack : null;
+  },
+});
 
 // ---------------------------------------------------------------------------
 // Small UI helpers
@@ -461,7 +472,7 @@ function render() {
 
   renderSpeaking();
   renderControls();
-  evalPanel?.syncCapture(); // participants' mic tracks may have changed
+  transcriber.sync(); // our mic track may have changed (mute, device switch)
 }
 
 function renderSpeaking() {
@@ -608,6 +619,13 @@ function addTranscript(seg) {
   const text = document.createElement('p');
   text.textContent = seg.text;
   el.append(who, text);
+  if (seg.lowConfidence) {
+    const flag = document.createElement('span');
+    flag.className = 'low-conf';
+    flag.textContent = '⚠ low confidence';
+    flag.title = 'The speech recognizer was unsure about this segment';
+    who.append(flag);
+  }
   const list = $('transcriptList');
   const partial = list.querySelector(`.seg.partial.${seg.speaker}`);
   list.insertBefore(el, partial || null);
@@ -629,7 +647,7 @@ function setPartial(speaker, text) {
     list.appendChild(el);
   }
   el.querySelector('.who').textContent = `${speaker === myRole ? 'You' : nameOf(speaker)} · speaking…`;
-  el.querySelector('p').textContent = text;
+  el.querySelector('p').textContent = text === '…' ? '' : text; // '…' = speaking, text not yet available
   $('transcriptEmpty').hidden = true;
 }
 
@@ -659,14 +677,19 @@ function applySnapshot(snapshot) {
   }
   renderStatus();
   renderControls();
-  syncEvalActive();
+  syncLiveState();
   tick();
 }
 
-function syncEvalActive() {
+/** Transcription runs only while the interview is LIVE and the socket is open. */
+function syncLiveState() {
   const live = state.interview?.status === 'LIVE';
-  $('transcribeChip').hidden = !(live && state.transcription === 'deepgram');
-  evalPanel?.setActive(live, state.ws?.readyState === WebSocket.OPEN);
+  const chip = $('transcribeChip');
+  chip.hidden = !(live && state.transcription !== 'unavailable');
+  chip.textContent = state.transcriptionOk ? '● Transcribing' : '⚠ Transcription unavailable';
+  chip.classList.toggle('warn', !state.transcriptionOk);
+  transcriber.setActive(live && state.ws?.readyState === WebSocket.OPEN);
+  evalPanel?.setActive(live);
 }
 
 function remainingMs() {
@@ -732,7 +755,7 @@ function connectWS() {
     state.wsRetry = 0;
     ws.send(JSON.stringify({ type: 'session_join', sessionId, participantKey: state.join.participantKey }));
     startHeartbeat();
-    syncEvalActive();
+    syncLiveState();
   };
 
   ws.onmessage = (ev) => {
@@ -745,7 +768,7 @@ function connectWS() {
   ws.onclose = () => {
     if (state.ws !== ws) return;
     stopHeartbeat();
-    syncEvalActive();
+    syncLiveState();
     if (state.leaving || !state.join) return;
     // Exponential backoff up to 10s; a rejoin resyncs state, timer and history.
     const delay = Math.min(10_000, 1000 * 2 ** state.wsRetry++);
@@ -800,6 +823,8 @@ function onServerMessage(msg) {
   switch (msg.type) {
     case 'session_joined':
       state.transcription = msg.transcription || 'unavailable';
+      state.transcriptionOk = msg.transcriptionStatus !== 'unavailable';
+      transcriber.setMode(state.transcription);
       (msg.transcript || []).forEach(addTranscript);
       evalPanel?.onJoined(msg);
       applySnapshot(msg.interview);
@@ -810,6 +835,16 @@ function onServerMessage(msg) {
       break;
     case 'interview_state':
       applySnapshot(msg.interview);
+      break;
+    case 'transcription_status':
+      state.transcriptionOk = msg.status === 'ok';
+      evalPanel?.setTranscriptionOk(state.transcriptionOk);
+      syncLiveState();
+      toast(state.transcriptionOk ? 'Transcription resumed' : 'Transcription unavailable — the interview continues', state.transcriptionOk ? '' : 'error');
+      break;
+    case 'speech_activity':
+      // Whisper transcribes whole segments, so show a "speaking…" placeholder meanwhile.
+      if (state.transcription === 'segments') setPartial(msg.speaker, msg.speaking ? '…' : '');
       break;
     case 'pong':
       break; // liveness is tracked in ws.onmessage
@@ -905,7 +940,7 @@ function teardown() {
   state.leaving = true;
   stopHeartbeat();
   clearTimeout(state.wsTimer);
-  evalPanel?.stopCapture();
+  transcriber.stop();
   if (state.ws) { const ws = state.ws; state.ws = null; ws.close(); }
   if (state.room) { const room = state.room; state.room = null; room.disconnect().catch(() => {}); }
   $('audioSink').innerHTML = '';
@@ -1044,11 +1079,6 @@ if (isHost) {
   evalPanel = createEvaluationPanel({
     sendWS,
     toast,
-    // Audio for server-side transcription: our own mic and the candidate's remote mic.
-    micTrack: (speaker) => {
-      const pub = participantFor(speaker)?.getTrackPublication(Track.Source.Microphone);
-      return pub && !pub.isMuted && pub.track ? pub.track.mediaStreamTrack : null;
-    },
     isVisible: () => state.tab === 'eval',
     setBadge: (n) => {
       $('evalBadge').textContent = String(n);

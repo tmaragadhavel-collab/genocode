@@ -110,7 +110,7 @@ const questionFlow = new QuestionFlow(
   sessions,
   evaluator,
   { toSession: sendToSession, toRole: sendToRole },
-  config.deepgramKey
+  config.stt
 );
 const reports = new ReportService(
   sessions,
@@ -406,6 +406,12 @@ wss.on('connection', (ws, req) => {
           break;
         case 'room_audio':
           questionFlow.handleAudio(state, msg);
+          break;
+        case 'audio_segment':
+          questionFlow.handleAudioSegment(state, msg);
+          break;
+        case 'speech_activity':
+          questionFlow.handleSpeechActivity(state, msg);
           break;
         case 'evaluation_retry':
           questionFlow.handleRetry(state, msg);

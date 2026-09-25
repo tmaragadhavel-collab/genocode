@@ -343,3 +343,6 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 .toast-action { font-weight: 700; color: var(--accent-strong); padding: 2px 4px; border-radius: 4px; white-space: nowrap; }
 .toast.error .toast-action { color: #8a1c21; }
 .toast-action:hover { text-decoration: underline; }
+
+.pill.rec.warn { background: rgba(242, 163, 58, 0.16); color: var(--warning); }
+.low-conf { margin-left: 8px; font-size: 11px; font-weight: 600; color: var(--warning); }

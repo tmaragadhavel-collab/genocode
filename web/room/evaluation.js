@@ -1,7 +1,7 @@
 // Interviewer-only: question tracking, planned questions, private notes, live
-// answer transcript, AI evaluation, and audio upload for server-side
-// speech-to-text. The server never sends any of this data to candidates; this
-// module is only initialised for the interviewer role.
+// answer transcript and AI evaluation. The server never sends any of this data
+// to candidates; this module is only initialised for the interviewer role.
+// (Audio capture for transcription lives in stt.js and runs for both roles.)
 
 const $ = (id) => document.getElementById(id);
 
@@ -33,16 +33,7 @@ function list(items, cls) {
   return items?.length ? h('ul', { className: `clist ${cls}` }, items.map((i) => h('li', {}, i))) : null;
 }
 
-function toBase64(int16) {
-  const bytes = new Uint8Array(int16.buffer);
-  let binary = '';
-  for (let i = 0; i < bytes.length; i += 0x8000) {
-    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
-  }
-  return btoa(binary);
-}
-
-export function createEvaluationPanel({ sendWS, toast, micTrack, isVisible, setBadge }) {
+export function createEvaluationPanel({ sendWS, toast, isVisible, setBadge }) {
   const st = {
     questions: [],
     planned: [],
@@ -52,12 +43,11 @@ export function createEvaluationPanel({ sendWS, toast, micTrack, isVisible, setB
     lastHeard: '',
     dismissed: new Set(),
     evaluator: 'llm',
-    transcription: 'deepgram',
-    captureEnabled: true,
+    transcription: 'unavailable',
+    transcriptionOk: true,
     live: false,
     unseen: 0,
   };
-  const capture = { ctx: null, nodes: {} };
   let showEval = () => {};
 
   const byId = (id) => st.questions.find((q) => q.questionId === id);
@@ -107,6 +97,7 @@ export function createEvaluationPanel({ sendWS, toast, micTrack, isVisible, setB
             ? 'No rubric given: the AI will derive the key concepts.'
             : 'No expected concepts given: demo scoring will be approximate.'),
         h('h3', {}, 'Candidate answer'),
+        current.lowConfidence ? h('div', { className: 'eval-warn', role: 'note' }, '⚠ Contains low-confidence transcription — check before relying on the score.') : null,
         answerBox,
         manual,
         h('div', { className: 'btn-row' },
@@ -139,13 +130,11 @@ export function createEvaluationPanel({ sendWS, toast, micTrack, isVisible, setB
         h('button', { className: 'host-btn primary', type: 'submit', disabled: !st.live }, 'Start question'),
         st.planned.some((p) => !p.askedQuestionId) ? h('span', { className: 'score-sub' }, 'or pick a planned question in the Questions tab') : null),
       h('div', { className: 'score-sub' },
-        st.transcription === 'deepgram'
-          ? `Live transcription: ${st.captureEnabled ? 'on' : 'paused'} · `
-          : 'Speech-to-text is not configured; add answers manually. ',
-        st.transcription === 'deepgram'
-          ? h('button', { type: 'button', className: 'linklike', onclick: () => { st.captureEnabled = !st.captureEnabled; syncCaptureLater(); render(); } },
-            st.captureEnabled ? 'Pause transcription' : 'Resume transcription')
-          : null),
+        st.transcription === 'unavailable'
+          ? 'Speech-to-text is not configured; add answers manually.'
+          : st.transcriptionOk
+            ? 'Live transcription is on for both participants while the interview is live.'
+            : 'Transcription unavailable right now — you can add answers manually.'),
     );
     box.append(form);
   }
@@ -195,6 +184,7 @@ export function createEvaluationPanel({ sendWS, toast, micTrack, isVisible, setB
       const overridden = q.override;
       parts.push(
         h('div', { className: 'score-big' }, String(q.finalScore), h('small', {}, ' / 100')),
+        q.lowConfidence ? h('div', { className: 'eval-warn', role: 'note' }, '⚠ Answer includes low-confidence transcription') : null,
         overridden
           ? h('div', { className: 'score-sub' }, `AI Score: ${overridden.aiScore} · Interviewer Score: ${overridden.finalScore} — “${overridden.overrideReason}” (${overridden.overriddenBy})`)
           : h('div', { className: 'score-sub' }, `${e.evaluator === 'demo-heuristic' ? 'Demo keyword scoring (no AI key) — not an AI judgement' : `AI-generated score · ${e.model}`} · confidence ${Math.round(e.confidence * 100)}%`),
@@ -269,7 +259,7 @@ export function createEvaluationPanel({ sendWS, toast, micTrack, isVisible, setB
       },
       h('span', { className: 'qn' }, `Q${q.index}`),
       h('span', { className: 'qt' }, q.questionText),
-      h('span', { className: `qs${q.status === 'completed' ? '' : ' pending'}` }, label)));
+      h('span', { className: `qs${q.status === 'completed' ? '' : ' pending'}` }, `${q.lowConfidence && q.status === 'completed' ? '⚠ ' : ''}${label}`)));
     }));
   }
 
@@ -303,52 +293,6 @@ export function createEvaluationPanel({ sendWS, toast, micTrack, isVisible, setB
       }
     }, 700);
   });
-
-  // ------------------------------------------------------------------ audio → server STT
-
-  let syncTimer = null;
-  let active = false; // interview LIVE and socket open
-  function syncCaptureLater() {
-    clearTimeout(syncTimer);
-    syncTimer = setTimeout(syncCapture, 50);
-  }
-
-  function syncCapture() {
-    const want = active && st.captureEnabled && st.transcription === 'deepgram';
-    if (!want) {
-      stopCapture();
-      return;
-    }
-    if (!capture.ctx) capture.ctx = new AudioContext({ sampleRate: 16000 });
-    capture.ctx.resume().catch(() => {});
-    for (const speaker of ['interviewer', 'candidate']) {
-      const track = micTrack(speaker);
-      const node = capture.nodes[speaker];
-      if (node?.track === track) continue;
-      if (node) { node.proc.disconnect(); node.src.disconnect(); delete capture.nodes[speaker]; }
-      if (!track) continue;
-      const src = capture.ctx.createMediaStreamSource(new MediaStream([track]));
-      const proc = capture.ctx.createScriptProcessor(4096, 1, 1);
-      proc.onaudioprocess = (ev) => {
-        const input = ev.inputBuffer.getChannelData(0);
-        const pcm = new Int16Array(input.length);
-        for (let i = 0; i < input.length; i++) {
-          const s = Math.max(-1, Math.min(1, input[i]));
-          pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
-        }
-        sendWS({ type: 'room_audio', speaker, data: toBase64(pcm) });
-      };
-      src.connect(proc);
-      proc.connect(capture.ctx.destination); // processor output is silent
-      capture.nodes[speaker] = { track, src, proc };
-    }
-  }
-
-  function stopCapture() {
-    for (const node of Object.values(capture.nodes)) { node.proc.disconnect(); node.src.disconnect(); }
-    capture.nodes = {};
-    if (capture.ctx) { capture.ctx.close().catch(() => {}); capture.ctx = null; }
-  }
 
   // ------------------------------------------------------------------ server events
 
@@ -437,18 +381,22 @@ export function createEvaluationPanel({ sendWS, toast, micTrack, isVisible, setB
     st.currentId = msg.currentQuestionId || null;
     st.evaluator = msg.evaluator || 'llm';
     st.transcription = msg.transcription || 'unavailable';
+    st.transcriptionOk = msg.transcriptionStatus !== 'unavailable';
     const lastMine = (msg.transcript || []).filter((s) => s.speaker === 'interviewer').at(-1);
     st.lastHeard = lastMine ? lastMine.text.slice(-160) : '';
     if (document.activeElement !== $('generalNotes')) $('generalNotes').value = msg.generalNotes || '';
     render();
   }
 
-  function setActive(isLive, socketOpen) {
-    const changed = st.live !== isLive;
+  function setActive(isLive) {
+    if (st.live === isLive) return;
     st.live = isLive;
-    active = isLive && socketOpen;
-    syncCaptureLater();
-    if (changed) render();
+    render();
+  }
+
+  function setTranscriptionOk(ok) {
+    st.transcriptionOk = ok;
+    if (!editingIn('questionBox')) renderQuestionBox();
   }
 
   function clearUnseen() {
@@ -461,8 +409,7 @@ export function createEvaluationPanel({ sendWS, toast, micTrack, isVisible, setB
     onMessage,
     onJoined,
     setActive,
-    syncCapture: syncCaptureLater,
-    stopCapture,
+    setTranscriptionOk,
     clearUnseen,
     onShowEval: (fn) => { showEval = fn; },
   };

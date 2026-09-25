@@ -13,7 +13,8 @@
     "eval:sample": "tsx scripts/eval-sample.ts",
     "db:setup": "node scripts/db-setup.js",
     "postinstall": "prisma generate",
-    "test:e2e": "node scripts/run-e2e.js"
+    "test:e2e": "node scripts/run-e2e.js",
+    "stt:sample": "tsx scripts/stt-sample.ts"
   },
   "dependencies": {
     "@prisma/client": "^6.19.3",

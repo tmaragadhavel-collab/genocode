@@ -3,7 +3,8 @@ import { DeepgramStreamingService } from './deepgramSTT';
 import { EvaluationError, type EvaluationService } from './evaluationService';
 import type { Difficulty, Evaluation, InterviewQuestion, Rubric, TranscriptSegment } from './evaluationTypes';
 import type { InterviewSession, ParticipantBinding, ParticipantRole, SessionManager } from './sessionManager';
-import type { TranscriptEntry } from '../types';
+import type { SttConfig, TranscriptEntry } from '../types';
+import { WhisperSTT, pcm16ToWav, SAMPLE_RATE, SttError } from '../stt/whisper';
 
 type Outbound = { type: string; sessionId?: string; [key: string]: unknown };
 
@@ -20,7 +21,19 @@ type Senders = {
 const MAX_QUESTION_LENGTH = 1000;
 const MAX_ANSWER_LENGTH = 8000;
 const MAX_SEGMENT_LENGTH = 2000;
-const MAX_AUDIO_B64 = 96 * 1024;
+const MAX_AUDIO_B64 = 96 * 1024; // one streaming chunk (Deepgram mode)
+const MAX_SEGMENT_B64 = 700 * 1024; // ~15s of 16 kHz PCM16 as base64
+const MIN_SEGMENT_BYTES = SAMPLE_RATE * 2 * 0.3; // 300 ms
+const MAX_SEGMENT_BYTES = SAMPLE_RATE * 2 * 16; // 16 s
+const MAX_QUEUED_SEGMENTS = 4; // per participant
+
+export type TranscriptQuality = {
+  source: 'stt' | 'manual';
+  avgLogprob: number | null;
+  noSpeechProb: number | null;
+  lowConfidence: boolean;
+};
+const MANUAL: TranscriptQuality = { source: 'manual', avgLogprob: null, noSpeechProb: null, lowConfidence: false };
 const RUBRIC_WAIT_MS = 20_000;
 const MAX_NOTE_LENGTH = 4000;
 const UNAVAILABLE = 'AI evaluation temporarily unavailable.';
@@ -49,16 +62,26 @@ function publicQuestion(q: InterviewQuestion) {
 export class QuestionFlow {
   private rubricJobs = new Map<string, Promise<void>>();
   private evalJobs = new Map<string, Set<Promise<void>>>(); // by session, for the final report
-  private stt = new Map<string, DeepgramStreamingService>();
+  private stt = new Map<string, DeepgramStreamingService>(); // Deepgram streaming mode
   private sttCheckedAt = new Map<string, number>();
   private sttWarned = new Set<string>();
+  private readonly whisper: WhisperSTT | null;
+  private segmentQueues = new Map<string, { chain: Promise<void>; size: number }>(); // per participant
+  private transcriptionDown = new Set<string>(); // sessions currently told "Transcription unavailable"
 
   constructor(
     private readonly sessions: SessionManager,
     private readonly evaluator: EvaluationService,
     private readonly send: Senders,
-    private readonly deepgramKey: string | null
-  ) {}
+    private readonly sttConfig: SttConfig
+  ) {
+    this.whisper = sttConfig.provider === 'groq' ? new WhisperSTT(sttConfig) : null;
+  }
+
+  /** How browsers should capture audio: VAD segments (Whisper), a PCM stream (Deepgram), or not at all. */
+  private get transcriptionMode(): 'segments' | 'stream' | 'unavailable' {
+    return this.sttConfig.provider === 'groq' ? 'segments' : this.sttConfig.provider === 'deepgram' ? 'stream' : 'unavailable';
+  }
 
   /** Extra data for session_joined, filtered by role. */
   joinData(session: InterviewSession, role: ParticipantRole): Record<string, unknown> {
@@ -71,13 +94,15 @@ export class QuestionFlow {
         generalNotes: session.generalNotes,
         transcript: session.transcript.slice(-100),
         evaluator: this.evaluator.demoMode ? 'demo-heuristic' : 'llm',
-        transcription: this.deepgramKey ? 'deepgram' : 'unavailable',
+        transcription: this.transcriptionMode,
+        transcriptionStatus: this.transcriptionDown.has(session.id) ? 'unavailable' : 'ok',
       };
     }
     // The candidate is told whether the conversation is transcribed, never how it is scored.
     return {
       currentQuestion: current ? publicQuestion(current) : null,
-      transcription: this.deepgramKey ? 'deepgram' : 'unavailable',
+      transcription: this.transcriptionMode,
+      transcriptionStatus: this.transcriptionDown.has(session.id) ? 'unavailable' : 'ok',
       // The shared transcript only: no question metadata, rubric or scores.
       transcript: session.transcript.slice(-100).map(({ id, speaker, text, timestamp }) => ({ id, speaker, text, timestamp })),
     };
@@ -270,24 +295,92 @@ export class QuestionFlow {
     this.ingest(session, speaker, text, isFinal);
   }
 
-  /** Audio uploaded by the interviewer client: its own mic and the candidate's remote track. */
-  handleAudio(client: QuestionFlowClient, msg: Record<string, unknown>): void {
-    const session = this.interviewerSession(client, false);
-    if (!session || session.status !== 'LIVE') return;
-    const speaker = msg.speaker === 'candidate' ? 'candidate' : msg.speaker === 'interviewer' ? 'interviewer' : null;
-    if (!speaker || typeof msg.data !== 'string' || msg.data.length > MAX_AUDIO_B64) return;
+  /**
+   * One speech segment (16 kHz mono PCM16, base64) cut by the sender's browser
+   * VAD. Any joined participant may send their own microphone's audio; the
+   * speaker label comes from the authenticated participant, never the message.
+   */
+  handleAudioSegment(client: QuestionFlowClient, msg: Record<string, unknown>): void {
+    const binding = client.binding;
+    const session = binding ? this.sessions.get(binding.sessionId) : undefined;
+    if (!binding || !session || session.status !== 'LIVE' || !this.whisper) return;
+    if (typeof msg.data !== 'string' || msg.data.length > MAX_SEGMENT_B64) return;
+    const pcm = Buffer.from(msg.data, 'base64');
+    if (pcm.length < MIN_SEGMENT_BYTES || pcm.length > MAX_SEGMENT_BYTES || pcm.length % 2) return;
 
-    if (!this.deepgramKey) {
+    // Transcribe each participant's segments in order, with a small bounded queue.
+    const key = binding.participantId;
+    const queue = this.segmentQueues.get(key) ?? { chain: Promise.resolve(), size: 0 };
+    if (queue.size >= MAX_QUEUED_SEGMENTS) {
+      console.warn(`[STT] ${binding.role} segment dropped: transcription queue full`);
+      return;
+    }
+    queue.size++;
+    const speaker = binding.role;
+    queue.chain = queue.chain
+      .then(() => this.transcribeSegment(session, speaker, pcm))
+      .finally(() => { queue.size--; });
+    this.segmentQueues.set(key, queue);
+  }
+
+  private async transcribeSegment(session: InterviewSession, speaker: 'interviewer' | 'candidate', pcm: Buffer): Promise<void> {
+    const started = Date.now();
+    try {
+      const r = await this.whisper!.transcribe(pcm16ToWav(pcm));
+      this.setTranscriptionStatus(session, true);
+      const seconds = (pcm.length / 2 / SAMPLE_RATE).toFixed(1);
+      if (r.discard) {
+        console.log(`[STT] ${speaker} ${seconds}s segment discarded (no speech; no_speech_prob ${r.noSpeechProb})`);
+        return;
+      }
+      console.log(`[STT] ${speaker} ${seconds}s → ${r.text.length} chars in ${Date.now() - started}ms${r.lowConfidence ? ' (low confidence)' : ''}`);
+      this.ingest(session, speaker, r.text, true, { source: 'stt', avgLogprob: r.avgLogprob, noSpeechProb: r.noSpeechProb, lowConfidence: r.lowConfidence });
+    } catch (err) {
+      const code = err instanceof SttError ? err.code : 'unknown';
+      console.error(`[STT] ${speaker} segment failed (${code}): ${(err as Error).message}`);
+      this.setTranscriptionStatus(session, false);
+    }
+  }
+
+  /** Tells both participants when transcription stops or resumes working. The call is unaffected. */
+  private setTranscriptionStatus(session: InterviewSession, ok: boolean): void {
+    const down = this.transcriptionDown.has(session.id);
+    if (ok === !down) return;
+    if (ok) this.transcriptionDown.delete(session.id); else this.transcriptionDown.add(session.id);
+    this.send.toSession(session.id, {
+      type: 'transcription_status',
+      sessionId: session.id,
+      status: ok ? 'ok' : 'unavailable',
+      message: ok ? 'Transcription resumed' : 'Transcription unavailable',
+    });
+  }
+
+  /** Voice activity from a participant's browser (drives the "speaking" indicator). */
+  handleSpeechActivity(client: QuestionFlowClient, msg: Record<string, unknown>): void {
+    const binding = client.binding;
+    const session = binding ? this.sessions.get(binding.sessionId) : undefined;
+    if (!binding || !session || session.status !== 'LIVE' || typeof msg.speaking !== 'boolean') return;
+    this.send.toSession(session.id, { type: 'speech_activity', sessionId: session.id, speaker: binding.role, speaking: msg.speaking });
+  }
+
+  /** Streaming PCM of the sender's own microphone (Deepgram mode). Speaker = authenticated role. */
+  handleAudio(client: QuestionFlowClient, msg: Record<string, unknown>): void {
+    const binding = client.binding;
+    const session = binding ? this.sessions.get(binding.sessionId) : undefined;
+    if (!binding || !session || session.status !== 'LIVE') return;
+    if (typeof msg.data !== 'string' || msg.data.length > MAX_AUDIO_B64) return;
+
+    if (this.sttConfig.provider !== 'deepgram') {
       if (!this.sttWarned.has(session.id)) {
         this.sttWarned.add(session.id);
-        this.error(client, 'stt_unavailable', 'Speech-to-text is not configured on the server. Type questions and use manual answers.');
+        this.setTranscriptionStatus(session, false);
       }
       return;
     }
 
     let stt = this.stt.get(session.id);
     if (!stt) {
-      stt = new DeepgramStreamingService({ apiKey: this.deepgramKey }, (entry) => this.onDeepgram(session.id, entry));
+      stt = new DeepgramStreamingService({ apiKey: this.sttConfig.apiKey }, (entry) => this.onDeepgram(session.id, entry));
       stt.ensureStreams();
       this.stt.set(session.id, stt);
       this.sttCheckedAt.set(session.id, Date.now());
@@ -299,17 +392,18 @@ export class QuestionFlow {
     }
 
     const buffer = Buffer.from(msg.data, 'base64');
-    if (speaker === 'candidate') stt.sendCandidateAudio(buffer);
+    if (binding.role === 'candidate') stt.sendCandidateAudio(buffer);
     else stt.sendInterviewerAudio(buffer);
   }
 
   private onDeepgram(sessionId: string, entry: TranscriptEntry): void {
     const session = this.sessions.get(sessionId);
     if (!session || !entry.text.trim() || entry.speaker === 'system') return;
-    this.ingest(session, entry.speaker, entry.text.trim(), entry.isFinal);
+    const lowConfidence = typeof entry.confidence === 'number' && entry.confidence < 0.6;
+    this.ingest(session, entry.speaker, entry.text.trim(), entry.isFinal, { ...MANUAL, source: 'stt', lowConfidence });
   }
 
-  private ingest(session: InterviewSession, speaker: 'interviewer' | 'candidate', text: string, isFinal: boolean): void {
+  private ingest(session: InterviewSession, speaker: 'interviewer' | 'candidate', text: string, isFinal: boolean, quality: TranscriptQuality = MANUAL): void {
     // Paused or finished interviews accept no new transcript or answers.
     if (session.status !== 'LIVE') return;
     const current = this.current(session);
@@ -328,10 +422,7 @@ export class QuestionFlow {
       speaker,
       text,
       timestamp: Date.now(),
-      source: 'manual',
-      avgLogprob: null,
-      noSpeechProb: null,
-      lowConfidence: false,
+      ...quality,
     };
     session.transcript.push(segment);
     if (session.transcript.length > 2000) session.transcript = session.transcript.slice(-2000);
@@ -344,6 +435,7 @@ export class QuestionFlow {
         this.send.toSession(session.id, { type: 'answer_started', sessionId: session.id, questionId: current.questionId });
       }
       current.answer = `${current.answer} ${text}`.trim().slice(0, MAX_ANSWER_LENGTH);
+      if (segment.lowConfidence) current.lowConfidence = true;
     }
   }
 
@@ -360,6 +452,7 @@ export class QuestionFlow {
     this.stt.get(sessionId)?.stop();
     this.stt.delete(sessionId);
     this.sttCheckedAt.delete(sessionId);
+    this.transcriptionDown.delete(sessionId);
   }
 
   private finishQuestion(session: InterviewSession, q: InterviewQuestion, reason: string): void {
