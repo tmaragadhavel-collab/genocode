@@ -30,6 +30,12 @@ const fakeWhisper = http.createServer((req, res) => {
   let body = '';
   req.on('data', (c) => { body += c; });
   req.on('end', () => {
+    // Fake LLM endpoint for the failure phase: always overloaded.
+    if (req.url.endsWith('/chat/completions')) {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: { message: 'fake LLM outage' } }));
+      return;
+    }
     if (req.url === '/control') {
       whisperMode = body.trim();
       res.end('ok');
@@ -54,9 +60,9 @@ const fakeWhisper = http.createServer((req, res) => {
 let server = null;
 let results = [];
 
-async function startServer(label) {
+async function startServer(label, extraEnv = {}) {
   const log = fs.openSync(path.join(tmp, `server-${label}.log`), 'a');
-  server = spawn(process.execPath, ['--import', 'tsx', 'server/index.ts'], { cwd: root, env, stdio: ['ignore', log, log] });
+  server = spawn(process.execPath, ['--import', 'tsx', 'server/index.ts'], { cwd: root, env: { ...env, ...extraEnv }, stdio: ['ignore', log, log] });
   for (let i = 0; i < 100; i++) {
     await new Promise((r) => setTimeout(r, 200));
     try {
@@ -100,6 +106,14 @@ async function suite(name, file, ...args) {
   await startServer('2');
   await suite('workflow persistence after restart', 'workflow.e2e.js', 'persist', state('workflow'));
   await suite('restore (after crash)', 'restore.e2e.js', 'after', state('restore'));
+  await killServer();
+
+  // Phase 3: the LLM provider is down (503 on every call, so retries run and fail).
+  await startServer('3', {
+    LLM_PROVIDER: 'groq', LLM_API_KEY: 'fake', LLM_MODEL: 'fake-model',
+    LLM_BASE_URL: `http://127.0.0.1:${whisperPort}/v1`, LLM_TIMEOUT_MS: '3000',
+  });
+  await suite('LLM failure → interview continues', 'llm-failure.e2e.js');
   await killServer();
   fakeWhisper.close();
 
