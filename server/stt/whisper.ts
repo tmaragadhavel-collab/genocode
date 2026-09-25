@@ -1,8 +1,10 @@
 import OpenAI, { toFile } from 'openai';
-import type { SttConfig } from '../types';
+import type { SttProviderConfig } from './types';
 import { redact } from '../llm/errors';
 
-export const SAMPLE_RATE = 16000;
+import { SAMPLE_RATE } from './types';
+
+export { SAMPLE_RATE };
 
 export type SttResult = {
   text: string;
@@ -53,7 +55,7 @@ type VerboseSegment = { avg_logprob?: number; no_speech_prob?: number; start?: n
 export class WhisperSTT {
   private readonly client: OpenAI;
 
-  constructor(private readonly cfg: SttConfig, private readonly timeoutMs = 20_000) {
+  constructor(private readonly cfg: SttProviderConfig, private readonly timeoutMs = 20_000) {
     this.client = new OpenAI({ apiKey: cfg.apiKey, baseURL: cfg.baseURL, maxRetries: 0 });
   }
 

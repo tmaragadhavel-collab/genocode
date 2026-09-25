@@ -44,7 +44,8 @@ export function createEvaluationPanel({ sendWS, toast, isVisible, setBadge }) {
     dismissed: new Set(),
     evaluator: 'llm',
     transcription: 'unavailable',
-    transcriptionOk: true,
+    stt: { self: null, candidate: null }, // real transcription states
+    unlinked: false, // candidate spoke while no question was active
     live: false,
     settings: { autoEndOnSilence: false, silenceSeconds: 5 },
     boundary: null, // { kind: 'silence' | 'newq', questionId, text? }
@@ -130,7 +131,7 @@ export function createEvaluationPanel({ sendWS, toast, isVisible, setBadge }) {
           const text = $('manualAnswer').value.trim();
           if (text && sendWS({ type: 'transcript_final', speaker: 'candidate', text })) $('manualAnswer').value = '';
         } }, 'Add to answer')));
-      box.append(
+      box.append(...[
         h('h3', {}, `Question ${current.index} · in progress`),
         h('div', { className: 'qtext' }, current.questionText),
         current.expectedConcepts?.length
@@ -145,7 +146,7 @@ export function createEvaluationPanel({ sendWS, toast, isVisible, setBadge }) {
         h('div', { className: 'btn-row' },
           h('button', { className: 'host-btn primary', type: 'button', disabled: !st.live, onclick: () => sendWS({ type: 'question_end' }) }, 'End question & evaluate')),
         autoEndControl(),
-      );
+      ].filter(Boolean)); // append() would print null as text
       answerBox.scrollTop = answerBox.scrollHeight;
       return;
     }
@@ -172,13 +173,14 @@ export function createEvaluationPanel({ sendWS, toast, isVisible, setBadge }) {
       h('div', { className: 'btn-row' },
         h('button', { className: 'host-btn primary', type: 'submit', disabled: !st.live }, 'Start question'),
         st.planned.some((p) => !p.askedQuestionId) ? h('span', { className: 'score-sub' }, 'or pick a planned question in the Questions tab') : null),
-      h('div', { className: 'score-sub' },
-        st.transcription === 'unavailable'
-          ? 'Speech-to-text is not configured; add answers manually.'
-          : st.transcriptionOk
-            ? 'Live transcription is on for both participants while the interview is live.'
-            : 'Transcription unavailable right now — you can add answers manually.'),
+      h('div', { className: 'score-sub' }, sttSummary()),
     );
+    if (st.unlinked && st.live) {
+      box.append(h('div', { className: 'eval-warn', role: 'alert' },
+        'The candidate is answering, but no question is active, so this answer will not be scored. ',
+        st.lastHeard ? h('button', { type: 'button', className: 'linklike', onclick: () => sendWS({ type: 'question_start' }) },
+          `Use “${st.lastHeard.slice(0, 60)}${st.lastHeard.length > 60 ? '…' : ''}” as the question`) : 'Type the question above and start it.'));
+    }
     box.append(form);
   }
 
@@ -386,6 +388,7 @@ export function createEvaluationPanel({ sendWS, toast, isVisible, setBadge }) {
         upsert(msg.question);
         st.currentId = msg.question.questionId;
         st.partial.candidate = '';
+        st.unlinked = false;
         const planned = st.planned.find((p) => p.id === msg.plannedQuestionId);
         if (planned) planned.askedQuestionId = msg.question.questionId;
         break;
@@ -416,6 +419,7 @@ export function createEvaluationPanel({ sendWS, toast, isVisible, setBadge }) {
         if (msg.speaker === 'interviewer') st.lastHeard = msg.text.slice(-160);
         const q = msg.questionId && byId(msg.questionId);
         if (q && msg.speaker === 'candidate') q.answer = `${q.answer} ${msg.text}`.trim();
+        if (msg.speaker === 'candidate' && !msg.questionId) st.unlinked = true;
         break;
       }
       case 'evaluation_started': {
@@ -472,7 +476,7 @@ export function createEvaluationPanel({ sendWS, toast, isVisible, setBadge }) {
     st.currentId = msg.currentQuestionId || null;
     st.evaluator = msg.evaluator || 'llm';
     st.transcription = msg.transcription || 'unavailable';
-    st.transcriptionOk = msg.transcriptionStatus !== 'unavailable';
+
     const lastMine = (msg.transcript || []).filter((s) => s.speaker === 'interviewer').at(-1);
     st.lastHeard = lastMine ? lastMine.text.slice(-160) : '';
     if (document.activeElement !== $('generalNotes')) $('generalNotes').value = msg.generalNotes || '';
@@ -485,8 +489,15 @@ export function createEvaluationPanel({ sendWS, toast, isVisible, setBadge }) {
     render();
   }
 
-  function setTranscriptionOk(ok) {
-    st.transcriptionOk = ok;
+  function sttSummary() {
+    if (st.transcription === 'unavailable') return 'Speech-to-text is not configured; add answers manually.';
+    const label = (s) => ({ transcribing: 'transcribing', connecting: 'connecting…', reconnecting: 'reconnecting…', unavailable: 'unavailable', stopped: 'stopped' }[s] || 'not started');
+    return `Transcription — you: ${label(st.stt.self)}, candidate: ${label(st.stt.candidate)}. Candidate speech is linked to the active question.`;
+  }
+
+  /** who: 'self' | 'candidate' */
+  function setTranscriptionState(who, state) {
+    st.stt[who] = state;
     if (!editingIn('questionBox')) renderQuestionBox();
   }
 
@@ -500,7 +511,7 @@ export function createEvaluationPanel({ sendWS, toast, isVisible, setBadge }) {
     onMessage,
     onJoined,
     setActive,
-    setTranscriptionOk,
+    setTranscriptionState,
     clearUnseen,
     onShowEval: (fn) => { showEval = fn; },
   };

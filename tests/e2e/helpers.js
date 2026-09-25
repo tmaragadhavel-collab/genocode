@@ -37,6 +37,7 @@ function wsClient(port, view = 'room') {
     ws.on('open', () => resolve({
       ws, inbox, all,
       send: (o) => ws.send(typeof o === 'string' ? o : JSON.stringify(o)),
+      sendBinary: (buf) => ws.send(buf, { binary: true }),
       wait: (pred, ms = 30000) => new Promise((res, rej) => {
         const i = inbox.findIndex(pred);
         if (i >= 0) return res(inbox.splice(i, 1)[0]);
@@ -50,6 +51,23 @@ function wsClient(port, view = 'room') {
 }
 
 const type = (t) => (m) => m.type === t;
+
+const FIXTURE_PCM = require('fs').readFileSync(require('path').join(__dirname, '..', 'fixtures', 'process-vs-thread.wav')).subarray(44);
+
+/**
+ * Streams speech like a browser mic: 100 ms binary PCM frames, then silence so
+ * the server's VAD ends the utterance. paceMs > 0 sends in (near) real time.
+ */
+async function speak(client, { pcm = FIXTURE_PCM, silenceMs = 1200, paceMs = 0 } = {}) {
+  const frame = 3200; // 100 ms of 16 kHz PCM16
+  const audio = Buffer.concat([pcm, Buffer.alloc(Math.round(silenceMs * 32))]);
+  for (let i = 0; i < audio.length; i += frame) {
+    client.sendBinary(audio.subarray(i, i + frame));
+    if (paceMs) await new Promise((r) => setTimeout(r, paceMs));
+  }
+}
+
+const startAudio = (client) => client.send({ type: 'audio_start', format: 'pcm16', sampleRate: 16000, channels: 1 });
 const keyOf = (u) => new URL(u).searchParams.get('key');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -58,4 +76,4 @@ function finish(checker) {
   process.exit(checker.failures ? 1 : 0);
 }
 
-module.exports = { createChecker, http, wsClient, type, keyOf, sleep, finish };
+module.exports = { createChecker, http, wsClient, type, keyOf, sleep, finish, speak, startAudio, FIXTURE_PCM };

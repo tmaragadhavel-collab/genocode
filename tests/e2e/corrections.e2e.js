@@ -1,15 +1,12 @@
 // Transcript correction + re-evaluation: interviewer/owner only, original kept,
 // every evaluation run kept as history, report refreshed after the interview.
 // Usage: node tests/e2e/corrections.e2e.js <port> <fakeWhisperControlUrl>
-const fs = require('fs');
-const path = require('path');
-const { createChecker, http, wsClient, type, keyOf, sleep, finish } = require('./helpers');
+const { createChecker, http, wsClient, type, keyOf, sleep, finish, speak, startAudio } = require('./helpers');
 
 const [port, controlUrl] = process.argv.slice(2);
 const api = http(`http://localhost:${port}`);
 const c = createChecker();
 const setMode = (mode) => fetch(controlUrl, { method: 'POST', body: mode });
-const segment = fs.readFileSync(path.join(__dirname, '..', 'fixtures', 'process-vs-thread.wav')).subarray(44).toString('base64');
 const settled = (qid) => (m) => (m.type === 'evaluation_completed' || m.type === 'evaluation_error') && m.questionId === qid;
 
 (async () => {
@@ -26,12 +23,14 @@ const settled = (qid) => (m) => (m.type === 'evaluation_completed' || m.type ===
   await C.wait(type('session_joined'));
   I.send({ type: 'interview_start' });
   await I.wait((m) => m.type === 'interview_state' && m.interview.status === 'LIVE');
+  startAudio(I);
+  startAudio(C);
 
   I.send({ type: 'question_start', questionText: 'What is the difference between a process and a thread?',
     expectedConcepts: ['process is an independent program in execution', 'threads share the memory of their process', 'context switching cost'] });
   const q = (await I.wait(type('question_started'))).question;
   await setMode('low');
-  C.send({ type: 'audio_segment', data: segment });
+  await speak(C);
   await I.wait((m) => m.type === 'transcript_final' && m.speaker === 'candidate');
   await setMode('ok');
 

@@ -36,7 +36,7 @@
         <span id="positionLabel" class="muted"></span>
       </div>
       <div class="topbar-right">
-        <span id="transcribeChip" class="pill rec" hidden title="The interview conversation is being transcribed">&#9679; Transcribing</span>
+        <button id="transcribeChip" class="pill rec" hidden disabled aria-live="polite"></button>
         <span id="statusPill" class="pill" role="status" aria-live="polite">Connecting…</span>
         <span id="timer" class="timer" aria-label="Time remaining">--:--</span>
         <span id="timerHint" class="muted small">remaining</span>
@@ -97,8 +97,12 @@
         </div>
 
         <div class="pane" role="tabpanel" id="pane-transcript" aria-labelledby="tab-transcript" hidden>
+          <div class="transcript-head">
+            <span id="sttStatus" class="score-sub"></span>
+            <span id="speakingNow" class="speaking-now" aria-live="polite"></span>
+          </div>
           <div class="pane-scroll transcript-list" id="transcriptList" aria-live="polite">
-            <p class="chat-empty" id="transcriptEmpty">The transcript appears here once the interview starts and people speak.</p>
+            <p class="chat-empty" id="transcriptEmpty">The transcript appears here once the interview starts and people speak. Both participants' speech is transcribed while the interview is live.</p>
           </div>
         </div>
 

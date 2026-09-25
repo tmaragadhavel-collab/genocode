@@ -76,6 +76,7 @@ function toRows(s: InterviewSession): RowSet {
       text: t.text,
       timestamp: new Date(t.timestamp),
       source: t.source,
+      confidence: t.confidence,
       avgLogprob: t.avgLogprob,
       noSpeechProb: t.noSpeechProb,
       lowConfidence: t.lowConfidence,
@@ -253,7 +254,7 @@ export class InterviewRepository {
       const transcript: TranscriptSegment[] = r.transcript.map((t) => ({
         id: t.id, sessionId: r.id, questionId: t.questionId, speaker: t.speaker as TranscriptSegment['speaker'], text: t.text,
         timestamp: t.timestamp.getTime(), source: t.source as TranscriptSegment['source'],
-        avgLogprob: t.avgLogprob, noSpeechProb: t.noSpeechProb, lowConfidence: t.lowConfidence,
+        confidence: t.confidence, avgLogprob: t.avgLogprob, noSpeechProb: t.noSpeechProb, lowConfidence: t.lowConfidence,
       }));
 
       const session: InterviewSession = {

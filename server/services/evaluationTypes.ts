@@ -8,6 +8,7 @@ export type TranscriptSegment = {
   text: string;
   timestamp: number;
   source: 'stt' | 'manual';
+  confidence: number | null; // provider confidence 0–1 (Deepgram)
   // Whisper quality signals when available; lowConfidence is shown in the UI.
   avgLogprob: number | null;
   noSpeechProb: number | null;

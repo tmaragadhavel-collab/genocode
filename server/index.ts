@@ -20,6 +20,7 @@ import { AuthService } from './services/authService';
 import { ReportService } from './services/reportService';
 import { getPrisma, assertDatabaseReady } from './db/prisma';
 import { InterviewRepository } from './db/interviewRepository';
+import { SttManager } from './stt/sttManager';
 import { createInterviewRouter } from './routes/interviews';
 import type { WSMessage, StreamChunk, TranscriptEntry, SessionState } from './types';
 
@@ -110,8 +111,19 @@ const questionFlow = new QuestionFlow(
   sessions,
   evaluator,
   { toSession: sendToSession, toRole: sendToRole },
-  config.stt
+  () => sttManager.mode
 );
+// Speech-to-text: one stream per participant mic; results feed the question flow as text.
+const sttManager = new SttManager(config.stt, sessions, {
+  onTranscript: (sessionId, role, participantId, ev) => questionFlow.ingestTranscript(
+    sessionId, role, ev.text, ev.isFinal,
+    { source: 'stt', confidence: ev.confidence, avgLogprob: ev.avgLogprob, noSpeechProb: ev.noSpeechProb, lowConfidence: ev.lowConfidence },
+    { segmentId: ev.segmentId, participantId }
+  ),
+  onSpeech: (sessionId, role, speaking) => questionFlow.onSpeechActivity(sessionId, role, speaking),
+  toInterviewers: (sessionId, msg) => sendToRole(sessionId, 'interviewer', msg),
+});
+console.log(`[STT] ${sttManager.describe()}`);
 const reports = new ReportService(
   sessions,
   llm,
@@ -125,6 +137,8 @@ const realtime = new InterviewRealtime(
   {
     joinData: (session, role) => questionFlow.joinData(session, role),
     onStatusChange: (session) => {
+      // Transcription only runs while LIVE; browsers restart capture on resume.
+      if (session.status !== 'LIVE') sttManager.stopSession(session.id);
       if (!sessions.isEnded(session)) return;
       // Stop taking answers, evaluate the last one, then build the report in the background.
       questionFlow.onInterviewEnded(session);
@@ -360,7 +374,13 @@ wss.on('connection', (ws, req) => {
     sendCandidateGreeting(ws);
   }
 
-  ws.on('message', (raw) => {
+  ws.on('message', (raw, isBinary) => {
+    // Binary frames are microphone PCM for this socket's authenticated participant.
+    if (isBinary) {
+      const buf = Buffer.isBuffer(raw) ? raw : Array.isArray(raw) ? Buffer.concat(raw) : Buffer.from(raw);
+      sttManager.audio(state, buf);
+      return;
+    }
     let msg: WSMessage & Record<string, unknown>;
     try {
       msg = JSON.parse(raw.toString());
@@ -405,14 +425,14 @@ wss.on('connection', (ws, req) => {
         case 'transcript_final':
           questionFlow.handleClientTranscript(state, msg, msg.type === 'transcript_final');
           break;
-        case 'room_audio':
-          questionFlow.handleAudio(state, msg);
+        case 'audio_start':
+          sttManager.start(state, msg);
           break;
-        case 'audio_segment':
-          questionFlow.handleAudioSegment(state, msg);
+        case 'audio_stop':
+          sttManager.stop(state);
           break;
-        case 'speech_activity':
-          questionFlow.handleSpeechActivity(state, msg);
+        case 'transcription_retry':
+          sttManager.retry(state);
           break;
         case 'evaluation_retry':
           questionFlow.handleRetry(state, msg);
@@ -463,6 +483,7 @@ wss.on('connection', (ws, req) => {
   });
 
   ws.on('close', () => {
+    sttManager.onSocketClosed(state);
     realtime.leave(state);
     clients.delete(ws);
     console.log('[ws] Client disconnected');

@@ -1,15 +1,12 @@
 // Answer boundaries: silence prompt, auto-end setting, spoken-new-question
 // suggestion. Manual controls stay authoritative; candidates see none of it.
 // Usage: node tests/e2e/boundaries.e2e.js <port> <fakeWhisperControlUrl>
-const fs = require('fs');
-const path = require('path');
-const { createChecker, http, wsClient, type, keyOf, sleep, finish } = require('./helpers');
+const { createChecker, http, wsClient, type, keyOf, sleep, finish, speak, startAudio } = require('./helpers');
 
 const [port, controlUrl] = process.argv.slice(2);
 const api = http(`http://localhost:${port}`);
 const c = createChecker();
 const setMode = (mode) => fetch(controlUrl, { method: 'POST', body: mode });
-const segment = fs.readFileSync(path.join(__dirname, '..', 'fixtures', 'process-vs-thread.wav')).subarray(44).toString('base64');
 
 (async () => {
   await setMode('ok');
@@ -34,14 +31,14 @@ const segment = fs.readFileSync(path.join(__dirname, '..', 'fixtures', 'process-
 
   I.send({ type: 'interview_start' });
   await I.wait((m) => m.type === 'interview_state' && m.interview.status === 'LIVE');
+  startAudio(I);
+  startAudio(C);
 
   // 1) Silence prompt (auto-end off): the question stays open.
   I.send({ type: 'question_start', questionText: 'What is the difference between a process and a thread?' });
   const q1 = (await I.wait(type('question_started'))).question;
-  C.send({ type: 'speech_activity', speaking: true });
-  C.send({ type: 'audio_segment', data: segment });
+  await speak(C);
   await I.wait((m) => m.type === 'transcript_final' && m.speaker === 'candidate');
-  C.send({ type: 'speech_activity', speaking: false });
   const t0 = Date.now();
   const prompt = await I.wait(type('answer_silence_prompt'), 8000);
   c.check('silence prompt after ~2s of candidate silence', prompt.questionId === q1.questionId && Date.now() - t0 >= 1500,
@@ -51,7 +48,7 @@ const segment = fs.readFileSync(path.join(__dirname, '..', 'fixtures', 'process-
 
   // 2) Interviewer speaks a new question while the answered one is open → suggestion only.
   await setMode('question');
-  I.send({ type: 'audio_segment', data: segment });
+  await speak(I);
   const sug = await I.wait(type('new_question_detected'), 10000);
   c.check('spoken new question → suggestion to close previous answer', sug.openQuestionId === q1.questionId && /\?$/.test(sug.text), `"${sug.text}"`);
   c.check('previous answer not auto-closed', !I.inbox.some((m) => m.type === 'answer_completed'));
@@ -66,10 +63,8 @@ const segment = fs.readFileSync(path.join(__dirname, '..', 'fixtures', 'process-
   await I.wait(type('settings_updated'));
   I.send({ type: 'question_start', questionText: 'Explain what a mutex is.' });
   const q2 = (await I.wait(type('question_started'))).question;
-  C.send({ type: 'speech_activity', speaking: true });
-  C.send({ type: 'audio_segment', data: segment });
+  await speak(C);
   await I.wait((m) => m.type === 'transcript_final' && m.speaker === 'candidate');
-  C.send({ type: 'speech_activity', speaking: false });
   const auto = await I.wait(type('answer_auto_ended'), 8000);
   c.check('auto-end ON: answer closed after silence', auto.questionId === q2.questionId && auto.reason === 'silence');
   c.check('auto-ended answer is evaluated', !!(await I.wait((m) => m.type === 'evaluation_started' && m.questionId === q2.questionId, 8000).catch(() => null)));
@@ -77,10 +72,10 @@ const segment = fs.readFileSync(path.join(__dirname, '..', 'fixtures', 'process-
   // 4) Auto-end ON + spoken new question → previous closed, new one started.
   I.send({ type: 'question_start', questionText: 'What is a deadlock?' });
   const q3 = (await I.wait(type('question_started'))).question;
-  C.send({ type: 'audio_segment', data: segment });
+  await speak(C);
   await I.wait((m) => m.type === 'transcript_final' && m.speaker === 'candidate');
   await setMode('question');
-  I.send({ type: 'audio_segment', data: segment });
+  await speak(I);
   const closed = await I.wait((m) => m.type === 'answer_auto_ended' && m.reason === 'new_question', 10000);
   const next = await I.wait(type('question_started'));
   c.check('auto-end ON: spoken question closes previous and starts new', closed.questionId === q3.questionId && next.question.questionText.endsWith('?'));

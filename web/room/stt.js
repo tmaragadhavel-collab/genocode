@@ -1,144 +1,172 @@
-// Captures this participant's OWN microphone for server-side transcription.
-// The server labels the speaker from the authenticated connection, so no
-// speaker field is sent.
+// Streams THIS participant's own microphone to the server for speech-to-text.
 //
-// 'segments' mode (Whisper): an energy-based voice-activity detector cuts
-// speech into segments: 800 ms of silence ends a segment, 15 s max per chunk.
-// 'stream' mode (Deepgram): raw 16 kHz PCM is streamed continuously.
+//   LiveKit mic track ──▶ AudioWorklet (16 kHz PCM16, 100 ms) ──▶ binary WebSocket frames
+//
+// LiveKit keeps delivering the same microphone to the other participant; this
+// is a second, independent consumer of the track. The server identifies the
+// speaker from the authenticated socket, so no speaker/role is sent.
+//
+// Protocol: {type:'audio_start', format:'pcm16', sampleRate:16000, channels:1},
+// then binary PCM frames, then {type:'audio_stop'}. The server replies with
+// {type:'transcription_state', state} for this participant's stream.
 
-const SAMPLE_RATE = 16000;
-const FRAME = 2048; // 128 ms per audio callback at 16 kHz
-const FRAME_MS = (FRAME / SAMPLE_RATE) * 1000;
-const END_SILENCE_MS = 800;
-const MAX_SEGMENT_MS = 15_000;
-const MIN_SPEECH_MS = 300;
-const PREROLL_FRAMES = 3; // keep ~400 ms before speech starts
+const WORKLET_URL = '/room-assets/pcm-worklet.js';
+const MAX_BUFFERED = 512 * 1024; // drop audio rather than queue it behind a congested socket
 
-function toBase64(int16) {
-  const bytes = new Uint8Array(int16.buffer, int16.byteOffset, int16.byteLength);
-  let binary = '';
-  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
-  return btoa(binary);
-}
-
-function toPcm16(float32) {
-  const pcm = new Int16Array(float32.length);
-  for (let i = 0; i < float32.length; i++) {
-    const s = Math.max(-1, Math.min(1, float32[i]));
-    pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
-  }
-  return pcm;
-}
-
-export function createTranscriber({ sendWS, getMicTrack }) {
-  let mode = 'unavailable';
-  let active = false;
+export function createTranscriber({ sendJSON, sendBinary, getMicTrack, onState }) {
+  let mode = 'unavailable'; // 'stream' | 'unavailable' (from the server)
+  let active = false; // interview LIVE and WebSocket open
   let ctx = null;
-  let node = null; // { track, src, proc }
+  let workletLoaded = false;
+  let node = null; // { track, src, worklet, sink }
+  let streaming = false; // audio_start sent and frames flowing
+  let state = 'idle';
+  let serverState = null;
   let syncTimer = null;
+  let restartAt = 0;
 
-  // VAD state
-  let speaking = false;
-  let frames = [];
-  let preroll = [];
-  let speechMs = 0;
-  let silentMs = 0;
-  let noise = 0.004; // running estimate of the background level
-
-  function resetVad() {
-    speaking = false;
-    frames = [];
-    preroll = [];
-    speechMs = 0;
-    silentMs = 0;
+  // Local capture state + server stream state → one user-facing state.
+  function emit() {
+    let next;
+    if (!active || mode === 'unavailable') next = mode === 'unavailable' && active ? 'unavailable' : 'idle';
+    else if (state === 'mic_off' || state === 'initializing' || state === 'blocked' || state === 'error') next = state;
+    else if (!streaming) next = 'initializing';
+    else next = serverState || 'connecting';
+    onState(next);
   }
 
-  function flush() {
-    if (speechMs >= MIN_SPEECH_MS && frames.length) {
-      const total = frames.reduce((n, f) => n + f.length, 0);
-      const pcm = new Int16Array(total);
-      let offset = 0;
-      for (const f of frames) { pcm.set(f, offset); offset += f.length; }
-      sendWS({ type: 'audio_segment', data: toBase64(pcm) });
+  function setLocal(s) {
+    state = s;
+    emit();
+  }
+
+  async function ensureContext() {
+    ctx ??= new AudioContext();
+    if (!workletLoaded) {
+      await ctx.audioWorklet.addModule(WORKLET_URL);
+      workletLoaded = true;
     }
-    frames = [];
-    speechMs = 0;
-    silentMs = 0;
+    if (ctx.state === 'suspended') {
+      await ctx.resume().catch(() => {});
+    }
+    return ctx.state === 'running';
   }
 
-  function onFrame(float32) {
-    const pcm = toPcm16(float32);
-    if (mode === 'stream') {
-      sendWS({ type: 'room_audio', data: toBase64(pcm) });
+  // Browsers may block audio until the user interacts with the page.
+  function resumeOnGesture() {
+    const handler = () => {
+      document.removeEventListener('pointerdown', handler, true);
+      document.removeEventListener('keydown', handler, true);
+      syncLater();
+    };
+    document.addEventListener('pointerdown', handler, true);
+    document.addEventListener('keydown', handler, true);
+  }
+
+  function detach() {
+    if (!node) return;
+    node.worklet.port.onmessage = null;
+    try { node.src.disconnect(); node.worklet.disconnect(); node.sink.disconnect(); } catch { /* already gone */ }
+    node = null;
+  }
+
+  function stopStreaming() {
+    detach();
+    if (streaming) {
+      sendJSON({ type: 'audio_stop' });
+      streaming = false;
+    }
+    serverState = null;
+  }
+
+  async function sync() {
+    if (!active || mode !== 'stream') {
+      stopStreaming();
+      setLocal('idle');
       return;
     }
-    let sum = 0;
-    for (let i = 0; i < float32.length; i++) sum += float32[i] * float32[i];
-    const rms = Math.sqrt(sum / float32.length);
-    const isSpeech = rms > Math.max(0.012, noise * 3);
-
-    if (!speaking) {
-      preroll.push(pcm);
-      if (preroll.length > PREROLL_FRAMES) preroll.shift();
-      if (isSpeech) {
-        speaking = true;
-        frames = [...preroll];
-        preroll = [];
-        speechMs = FRAME_MS;
-        silentMs = 0;
-        sendWS({ type: 'speech_activity', speaking: true });
-      } else {
-        noise = noise * 0.95 + rms * 0.05;
-      }
-      return;
-    }
-
-    frames.push(pcm);
-    if (isSpeech) { speechMs += FRAME_MS; silentMs = 0; } else { silentMs += FRAME_MS; }
-    const durationMs = frames.length * FRAME_MS;
-    if (silentMs >= END_SILENCE_MS) {
-      flush();
-      speaking = false;
-      sendWS({ type: 'speech_activity', speaking: false });
-    } else if (durationMs >= MAX_SEGMENT_MS) {
-      flush(); // long answer: cut and keep listening
-    }
-  }
-
-  function stopCapture() {
-    if (node) { node.proc.disconnect(); node.src.disconnect(); node = null; }
-    if (speaking) sendWS({ type: 'speech_activity', speaking: false });
-    resetVad();
-    if (ctx) { ctx.close().catch(() => {}); ctx = null; }
-  }
-
-  function sync() {
-    const track = active && mode !== 'unavailable' ? getMicTrack() : null;
+    const track = getMicTrack();
     if (!track) {
-      stopCapture();
+      stopStreaming();
+      setLocal('mic_off');
       return;
     }
-    if (node?.track === track) return;
-    if (node) { node.proc.disconnect(); node.src.disconnect(); node = null; }
-    resetVad();
-    ctx ??= new AudioContext({ sampleRate: SAMPLE_RATE });
-    ctx.resume().catch(() => {});
+    if (node?.track === track && streaming) return;
+
+    setLocal('initializing');
+    try {
+      if (!(await ensureContext())) {
+        setLocal('blocked');
+        resumeOnGesture();
+        return;
+      }
+    } catch (err) {
+      console.error('[stt] audio capture unavailable:', err);
+      setLocal('error');
+      return;
+    }
+    if (!active || getMicTrack() !== track) return; // changed while awaiting
+
+    detach();
     const src = ctx.createMediaStreamSource(new MediaStream([track]));
-    const proc = ctx.createScriptProcessor(FRAME, 1, 1);
-    proc.onaudioprocess = (ev) => onFrame(ev.inputBuffer.getChannelData(0));
-    src.connect(proc);
-    proc.connect(ctx.destination); // output is silent; needed for processing to run
-    node = { track, src, proc };
+    const worklet = new AudioWorkletNode(ctx, 'pcm16-capture', { numberOfInputs: 1, numberOfOutputs: 1, channelCount: 1 });
+    const sink = ctx.createGain();
+    sink.gain.value = 0; // keep the graph pulled without making any sound
+    src.connect(worklet);
+    worklet.connect(sink);
+    sink.connect(ctx.destination);
+    node = { track, src, worklet, sink };
+
+    if (!streaming) {
+      sendJSON({ type: 'audio_start', format: 'pcm16', sampleRate: 16000, channels: 1 });
+      streaming = true;
+      serverState = 'connecting';
+    }
+    worklet.port.onmessage = (ev) => {
+      if (!streaming) return;
+      sendBinary(ev.data.buffer, MAX_BUFFERED);
+    };
+    setLocal('capturing');
   }
 
-  const syncLater = () => { clearTimeout(syncTimer); syncTimer = setTimeout(sync, 50); };
+  function syncLater() {
+    clearTimeout(syncTimer);
+    syncTimer = setTimeout(() => { sync(); }, 50);
+  }
 
   return {
-    setMode(m) { mode = m || 'unavailable'; syncLater(); },
+    setMode(m) { mode = m === 'stream' ? 'stream' : 'unavailable'; syncLater(); },
     /** Capture only while the interview is LIVE and the WebSocket is open. */
-    setActive(a) { active = a; syncLater(); },
-    /** Call when local tracks change (mute/unmute, device switch). */
+    setActive(a) {
+      if (active && !a) stopStreaming();
+      active = a;
+      syncLater();
+    },
+    /** Call when local tracks may have changed (mute/unmute, device switch). */
     sync: syncLater,
-    stop: stopCapture,
+    /** transcription_state for this participant's own stream. */
+    onServerState(s) {
+      if (s === 'stopped' && active && streaming) {
+        // The server has no stream for us (e.g. it restarted): start a new one, at most every 3s.
+        streaming = false;
+        detach();
+        if (Date.now() - restartAt > 3000) {
+          restartAt = Date.now();
+          syncLater();
+        }
+        return;
+      }
+      serverState = s;
+      emit();
+    },
+    retry() {
+      if (streaming) sendJSON({ type: 'transcription_retry' });
+      else syncLater();
+    },
+    stop() {
+      active = false;
+      stopStreaming();
+      setLocal('idle');
+    },
   };
 }

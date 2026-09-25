@@ -36,10 +36,11 @@ const state = {
   chatSeen: new Set(),
   unreadChat: 0,
   transcription: 'unavailable', // 'segments' | 'stream' | 'unavailable'
-  transcriptionOk: true,
+  sttState: 'idle', // our own transcription state
+  peerStt: null, // interviewer view: the candidate's transcription state
+  speakingNow: {},
   tab: null, // open side-panel tab, or null when closed
   transcriptSeen: new Set(),
-  partial: { interviewer: '', candidate: '' },
 };
 
 // Interviewer-only AI evaluation module (the server never sends evaluation data to candidates).
@@ -47,11 +48,17 @@ let evalPanel = null;
 
 // Both roles: our own microphone → server speech-to-text (speaker set server-side).
 const transcriber = createTranscriber({
-  sendWS: (msg) => sendWS(msg),
+  sendJSON: (msg) => sendWS(msg),
+  // Binary PCM frames; skipped (not queued) if the socket is congested.
+  sendBinary: (buf, maxBuffered) => {
+    const ws = state.ws;
+    if (ws?.readyState === WebSocket.OPEN && ws.bufferedAmount < maxBuffered) ws.send(buf);
+  },
   getMicTrack: () => {
     const pub = state.room?.localParticipant?.getTrackPublication(Track.Source.Microphone);
     return pub && !pub.isMuted && pub.track ? pub.track.mediaStreamTrack : null;
   },
+  onState: (s) => renderTranscriptionState(s),
 });
 
 // ---------------------------------------------------------------------------
@@ -604,51 +611,101 @@ async function onMenu(action) {
 // Transcript tab (both roles: shared conversation text only)
 // ---------------------------------------------------------------------------
 
-function addTranscript(seg) {
-  if (state.transcriptSeen.has(seg.id)) return;
-  state.transcriptSeen.add(seg.id);
-  $('transcriptEmpty').hidden = true;
-  const el = document.createElement('div');
-  el.className = `seg ${seg.speaker}`;
-  const who = document.createElement('div');
-  who.className = 'who';
-  who.textContent = seg.speaker === myRole ? 'You' : nameOf(seg.speaker);
-  const time = document.createElement('time');
-  time.textContent = new Date(seg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-  who.append(time);
-  const text = document.createElement('p');
-  text.textContent = seg.text;
-  el.append(who, text);
-  if (seg.lowConfidence) {
-    const flag = document.createElement('span');
-    flag.className = 'low-conf';
-    flag.textContent = '⚠ low confidence';
-    flag.title = 'The speech recognizer was unsure about this segment';
-    who.append(flag);
-  }
+const segEls = new Map(); // segmentId → element (partials become finals in place)
+
+function fmtTime(ts) {
+  return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+/** Adds or updates one utterance. Partials show LIVE; the final replaces them (no duplicates). */
+function upsertSegment(seg, isFinal) {
+  const id = seg.segmentId || seg.id;
+  if (isFinal && state.transcriptSeen.has(id)) return;
   const list = $('transcriptList');
-  const partial = list.querySelector(`.seg.partial.${seg.speaker}`);
-  list.insertBefore(el, partial || null);
-  // Keep the DOM bounded in long interviews.
-  const segs = list.querySelectorAll('.seg:not(.partial)');
-  if (segs.length > 400) segs[0].remove();
   const nearBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 80;
+  let el = id ? segEls.get(id) : null;
+  if (!el) {
+    el = document.createElement('div');
+    el.innerHTML = '<div class="who"><span class="name"></span><time></time><span class="badge-live"></span></div><p></p><div class="seg-actions"></div>';
+    list.appendChild(el);
+    if (id) segEls.set(id, el);
+  }
+  $('transcriptEmpty').hidden = true;
+  el.className = `seg ${seg.speaker}${isFinal ? '' : ' partial'}`;
+  el.querySelector('.name').textContent = `${seg.speaker === myRole ? 'You' : nameOf(seg.speaker)} · ${ROLE_LABEL[seg.speaker]}`;
+  el.querySelector('time').textContent = fmtTime(seg.timestamp || Date.now());
+  const badge = el.querySelector('.badge-live');
+  badge.textContent = isFinal ? (seg.lowConfidence ? '⚠ low confidence' : '') : 'LIVE';
+  badge.className = `badge-live${isFinal ? (seg.lowConfidence ? ' low' : ' final') : ''}`;
+  badge.title = seg.lowConfidence ? 'The speech recognizer was unsure about this segment' : '';
+  el.querySelector('p').textContent = seg.text === '…' ? 'speaking…' : seg.text;
+
+  const actions = el.querySelector('.seg-actions');
+  actions.replaceChildren();
+  // Interviewer: turn their own spoken question into the current question (never automatic).
+  if (isFinal && isHost && seg.speaker === 'interviewer' && seg.text.split(/\s+/).length >= 3) {
+    const use = document.createElement('button');
+    use.type = 'button';
+    use.className = 'linklike';
+    use.textContent = 'Use as question';
+    use.disabled = state.interview?.status !== 'LIVE';
+    use.addEventListener('click', () => {
+      if (sendWS({ type: 'question_start', questionText: seg.text })) {
+        use.textContent = 'Question started';
+        use.disabled = true;
+      }
+    });
+    actions.append(use);
+  }
+
+  if (isFinal && id) {
+    state.transcriptSeen.add(id);
+    segEls.delete(id);
+  }
+  // Keep the DOM bounded in long interviews.
+  const all = list.querySelectorAll('.seg:not(.partial)');
+  if (all.length > 400) all[0].remove();
   if (nearBottom) list.scrollTop = list.scrollHeight;
 }
 
-function setPartial(speaker, text) {
-  const list = $('transcriptList');
-  let el = list.querySelector(`.seg.partial.${speaker}`);
-  if (!text) { el?.remove(); return; }
-  if (!el) {
-    el = document.createElement('div');
-    el.className = `seg partial ${speaker}`;
-    el.innerHTML = '<div class="who"></div><p></p>';
-    list.appendChild(el);
-  }
-  el.querySelector('.who').textContent = `${speaker === myRole ? 'You' : nameOf(speaker)} · speaking…`;
-  el.querySelector('p').textContent = text === '…' ? '' : text; // '…' = speaking, text not yet available
-  $('transcriptEmpty').hidden = true;
+/** "Candidate speaking…" in the transcript header (from the server's voice detection). */
+function setSpeaking(speaker, speaking) {
+  state.speakingNow[speaker] = speaking;
+  const who = Object.entries(state.speakingNow).filter(([, v]) => v).map(([k]) => (k === myRole ? 'You' : nameOf(k)));
+  $('speakingNow').textContent = who.length ? `${who.join(' and ')} speaking…` : '';
+}
+
+const STT_LABEL = {
+  idle: '',
+  initializing: 'Initializing microphone…',
+  capturing: 'Connecting to transcription…',
+  connecting: 'Connecting to transcription…',
+  transcribing: '● Transcribing',
+  reconnecting: 'Transcription reconnecting…',
+  unavailable: '⚠ Live transcription unavailable — Retry',
+  stopped: 'Transcription stopped',
+  mic_off: 'Mic off — not transcribing',
+  blocked: 'Click anywhere to enable transcription',
+  error: '⚠ Transcription unavailable in this browser',
+};
+
+/** Our own transcription state (local capture + server stream). */
+function renderTranscriptionState(s) {
+  state.sttState = s;
+  const chip = $('transcribeChip');
+  chip.hidden = s === 'idle';
+  chip.textContent = STT_LABEL[s] ?? s;
+  chip.dataset.state = s;
+  chip.classList.toggle('warn', ['unavailable', 'reconnecting', 'error', 'blocked', 'mic_off'].includes(s));
+  chip.disabled = s !== 'unavailable';
+  chip.title = s === 'unavailable' ? 'Retry transcription' : 'Speech-to-text status for your microphone';
+  renderSttHeader();
+}
+
+function renderSttHeader() {
+  const own = STT_LABEL[state.sttState] || '';
+  const peer = isHost && state.peerStt ? `Candidate: ${(STT_LABEL[state.peerStt] || state.peerStt).replace(' — Retry', '')}` : '';
+  $('sttStatus').textContent = [own && `You: ${own.replace(' — Retry', '')}`, peer].filter(Boolean).join(' · ');
 }
 
 // ---------------------------------------------------------------------------
@@ -684,10 +741,6 @@ function applySnapshot(snapshot) {
 /** Transcription runs only while the interview is LIVE and the socket is open. */
 function syncLiveState() {
   const live = state.interview?.status === 'LIVE';
-  const chip = $('transcribeChip');
-  chip.hidden = !(live && state.transcription !== 'unavailable');
-  chip.textContent = state.transcriptionOk ? '● Transcribing' : '⚠ Transcription unavailable';
-  chip.classList.toggle('warn', !state.transcriptionOk);
   transcriber.setActive(live && state.ws?.readyState === WebSocket.OPEN);
   evalPanel?.setActive(live);
 }
@@ -811,21 +864,15 @@ function reportMedia() {
 
 function onServerMessage(msg) {
   // The shared transcript tab is updated for both roles.
-  if (msg.type === 'transcript_final') {
-    state.partial[msg.speaker] = '';
-    setPartial(msg.speaker, '');
-    addTranscript(msg);
-  } else if (msg.type === 'transcript_partial') {
-    setPartial(msg.speaker, msg.text);
-  }
+  if (msg.type === 'transcript_final') upsertSegment(msg, true);
+  else if (msg.type === 'transcript_partial') upsertSegment(msg, false);
   if (msg.type !== 'session_joined' && evalPanel?.onMessage(msg)) return;
 
   switch (msg.type) {
     case 'session_joined':
       state.transcription = msg.transcription || 'unavailable';
-      state.transcriptionOk = msg.transcriptionStatus !== 'unavailable';
       transcriber.setMode(state.transcription);
-      (msg.transcript || []).forEach(addTranscript);
+      (msg.transcript || []).forEach((seg) => upsertSegment(seg, true));
       evalPanel?.onJoined(msg);
       applySnapshot(msg.interview);
       loadChatHistory(msg.history || [], msg.pending);
@@ -836,15 +883,23 @@ function onServerMessage(msg) {
     case 'interview_state':
       applySnapshot(msg.interview);
       break;
-    case 'transcription_status':
-      state.transcriptionOk = msg.status === 'ok';
-      evalPanel?.setTranscriptionOk(state.transcriptionOk);
-      syncLiveState();
-      toast(state.transcriptionOk ? 'Transcription resumed' : 'Transcription unavailable — the interview continues', state.transcriptionOk ? '' : 'error');
+    case 'transcription_state': {
+      const own = msg.participantId === state.join?.identity;
+      const prev = own ? state.sttState : state.peerStt;
+      if (own) transcriber.onServerState(msg.state);
+      else if (isHost) {
+        state.peerStt = msg.state;
+        renderSttHeader();
+      }
+      evalPanel?.setTranscriptionState(own ? 'self' : 'candidate', msg.state);
+      if (msg.state === 'unavailable' && prev !== 'unavailable') {
+        toast(own ? 'Live transcription unavailable — the interview continues.' : "Candidate's live transcription is unavailable.", 'error',
+          own ? { label: 'Retry transcription', run: () => transcriber.retry() } : null);
+      }
       break;
+    }
     case 'speech_activity':
-      // Whisper transcribes whole segments, so show a "speaking…" placeholder meanwhile.
-      if (state.transcription === 'segments') setPartial(msg.speaker, msg.speaking ? '…' : '');
+      setSpeaking(msg.speaker, msg.speaking);
       break;
     case 'pong':
       break; // liveness is tracked in ws.onmessage
@@ -1010,6 +1065,9 @@ $('chatInput').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) sendChat(e);
 });
 $('audioUnlock').addEventListener('click', () => state.room?.startAudio());
+$('transcribeChip').addEventListener('click', () => {
+  if (state.sttState === 'unavailable') transcriber.retry();
+});
 
 for (const t of TABS) {
   $(`tab-${t}`).hidden = false;

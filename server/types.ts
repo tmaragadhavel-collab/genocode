@@ -70,9 +70,11 @@ export type WSMessageType =
   | 'transcript_partial'
   | 'transcript_final'
   | 'room_audio'
-  | 'audio_segment'
+  | 'audio_start'
+  | 'audio_stop'
+  | 'transcription_retry'
+  | 'transcription_state'
   | 'speech_activity'
-  | 'transcription_status'
   | 'interview_settings'
   | 'settings_updated'
   | 'answer_silence_prompt'
@@ -108,19 +110,14 @@ export type SessionState =
   | 'waiting_for_next_question'
   | 'error';
 
-export type SttConfig = {
-  provider: 'groq' | 'deepgram' | 'none';
-  apiKey: string;
-  model: string;
-  baseURL: string;
-};
+import type { SttSettings } from './stt/types';
 
 export type ServerConfig = {
   port: number;
   isProduction: boolean;
   publicBaseUrl: string | null;
   databaseUrl: string;
-  stt: SttConfig;
+  stt: SttSettings;
   deepgramKey: string | null;
   answerSilenceSeconds: number;
   demoMode: boolean;

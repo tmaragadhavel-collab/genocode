@@ -130,6 +130,7 @@ model TranscriptSegment {
   text          String
   timestamp     DateTime
   source        String // 'stt' | 'manual'
+  confidence    Float? // provider confidence 0-1 (Deepgram)
   avgLogprob    Float?
   noSpeechProb  Float?
   lowConfidence Boolean   @default(false)

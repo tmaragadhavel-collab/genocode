@@ -1,11 +1,8 @@
 import { randomBytes } from 'crypto';
-import { DeepgramStreamingService } from './deepgramSTT';
 import { EvaluationError, type EvaluationService } from './evaluationService';
 import type { Difficulty, Evaluation, InterviewQuestion, Rubric, TranscriptSegment } from './evaluationTypes';
 import type { InterviewSession, ParticipantBinding, ParticipantRole, SessionManager } from './sessionManager';
-import type { SttConfig, TranscriptEntry } from '../types';
 import type { PlannedQuestion } from './reportTypes';
-import { WhisperSTT, pcm16ToWav, SAMPLE_RATE, SttError } from '../stt/whisper';
 
 type Outbound = { type: string; sessionId?: string; [key: string]: unknown };
 
@@ -22,19 +19,18 @@ type Senders = {
 const MAX_QUESTION_LENGTH = 1000;
 const MAX_ANSWER_LENGTH = 8000;
 const MAX_SEGMENT_LENGTH = 2000;
-const MAX_AUDIO_B64 = 96 * 1024; // one streaming chunk (Deepgram mode)
-const MAX_SEGMENT_B64 = 700 * 1024; // ~15s of 16 kHz PCM16 as base64
-const MIN_SEGMENT_BYTES = SAMPLE_RATE * 2 * 0.3; // 300 ms
-const MAX_SEGMENT_BYTES = SAMPLE_RATE * 2 * 16; // 16 s
-const MAX_QUEUED_SEGMENTS = 4; // per participant
 
 export type TranscriptQuality = {
   source: 'stt' | 'manual';
+  confidence: number | null;
   avgLogprob: number | null;
   noSpeechProb: number | null;
   lowConfidence: boolean;
 };
-const MANUAL: TranscriptQuality = { source: 'manual', avgLogprob: null, noSpeechProb: null, lowConfidence: false };
+const MANUAL: TranscriptQuality = { source: 'manual', confidence: null, avgLogprob: null, noSpeechProb: null, lowConfidence: false };
+
+/** Identifies an STT utterance: partials and the final share segmentId. */
+export type TranscriptMeta = { segmentId: string; participantId: string };
 const RUBRIC_WAIT_MS = 20_000;
 const MAX_NOTE_LENGTH = 4000;
 const UNAVAILABLE = 'AI evaluation temporarily unavailable.';
@@ -70,12 +66,7 @@ function publicQuestion(q: InterviewQuestion) {
 export class QuestionFlow {
   private rubricJobs = new Map<string, Promise<void>>();
   private evalJobs = new Map<string, Set<Promise<void>>>(); // by session, for the final report
-  private stt = new Map<string, DeepgramStreamingService>(); // Deepgram streaming mode
-  private sttCheckedAt = new Map<string, number>();
-  private sttWarned = new Set<string>();
-  private readonly whisper: WhisperSTT | null;
-  private segmentQueues = new Map<string, { chain: Promise<void>; size: number }>(); // per participant
-  private transcriptionDown = new Set<string>();
+
   // Answer-boundary assistance, per session.
   private candidateActivity = new Map<string, { speaking: boolean; lastAt: number; prompted: boolean }>(); // sessions currently told "Transcription unavailable"
 
@@ -83,15 +74,10 @@ export class QuestionFlow {
     private readonly sessions: SessionManager,
     private readonly evaluator: EvaluationService,
     private readonly send: Senders,
-    private readonly sttConfig: SttConfig
+    /** 'stream' when a speech-to-text provider is configured. */
+    private readonly transcriptionMode: () => 'stream' | 'unavailable'
   ) {
-    this.whisper = sttConfig.provider === 'groq' ? new WhisperSTT(sttConfig) : null;
     setInterval(() => this.checkSilence(), 1000).unref();
-  }
-
-  /** How browsers should capture audio: VAD segments (Whisper), a PCM stream (Deepgram), or not at all. */
-  private get transcriptionMode(): 'segments' | 'stream' | 'unavailable' {
-    return this.sttConfig.provider === 'groq' ? 'segments' : this.sttConfig.provider === 'deepgram' ? 'stream' : 'unavailable';
   }
 
   /** Extra data for session_joined, filtered by role. */
@@ -106,15 +92,13 @@ export class QuestionFlow {
         generalNotes: session.generalNotes,
         transcript: session.transcript.slice(-100),
         evaluator: this.evaluator.demoMode ? 'demo-heuristic' : 'llm',
-        transcription: this.transcriptionMode,
-        transcriptionStatus: this.transcriptionDown.has(session.id) ? 'unavailable' : 'ok',
+        transcription: this.transcriptionMode(),
       };
     }
     // The candidate is told whether the conversation is transcribed, never how it is scored.
     return {
       currentQuestion: current ? publicQuestion(current) : null,
-      transcription: this.transcriptionMode,
-      transcriptionStatus: this.transcriptionDown.has(session.id) ? 'unavailable' : 'ok',
+      transcription: this.transcriptionMode(),
       // The shared transcript only: no question metadata, rubric or scores.
       transcript: session.transcript.slice(-100).map(({ id, speaker, text, timestamp }) => ({ id, speaker, text, timestamp })),
     };
@@ -196,7 +180,7 @@ export class QuestionFlow {
     if (planned) planned.askedQuestionId = question.questionId;
     session.questions.push(question);
     session.currentQuestionId = question.questionId;
-    console.log(`[QUESTION] ${session.id} Q${index} started: "${questionText.slice(0, 80)}"`);
+    console.log(`[QUESTION] ${session.id} Q${index} question started: "${questionText.slice(0, 80)}"`);
 
     this.send.toRole(session.id, 'interviewer', { type: 'question_started', sessionId: session.id, question, plannedQuestionId: planned?.id ?? null });
     this.send.toRole(session.id, 'candidate', { type: 'question_started', sessionId: session.id, question: publicQuestion(question) });
@@ -445,128 +429,42 @@ export class QuestionFlow {
   }
 
   /**
-   * One speech segment (16 kHz mono PCM16, base64) cut by the sender's browser
-   * VAD. Any joined participant may send their own microphone's audio; the
-   * speaker label comes from the authenticated participant, never the message.
+   * Voice activity from the server-side VAD on a participant's stream: drives
+   * the "speaking…" indicator and the candidate-silence answer suggestion.
    */
-  handleAudioSegment(client: QuestionFlowClient, msg: Record<string, unknown>): void {
-    const binding = client.binding;
-    const session = binding ? this.sessions.get(binding.sessionId) : undefined;
-    if (!binding || !session || session.status !== 'LIVE' || !this.whisper) return;
-    if (typeof msg.data !== 'string' || msg.data.length > MAX_SEGMENT_B64) return;
-    const pcm = Buffer.from(msg.data, 'base64');
-    if (pcm.length < MIN_SEGMENT_BYTES || pcm.length > MAX_SEGMENT_BYTES || pcm.length % 2) return;
-
-    // Transcribe each participant's segments in order, with a small bounded queue.
-    const key = binding.participantId;
-    const queue = this.segmentQueues.get(key) ?? { chain: Promise.resolve(), size: 0 };
-    if (queue.size >= MAX_QUEUED_SEGMENTS) {
-      console.warn(`[STT] ${binding.role} segment dropped: transcription queue full`);
-      return;
-    }
-    queue.size++;
-    const speaker = binding.role;
-    queue.chain = queue.chain
-      .then(() => this.transcribeSegment(session, speaker, pcm))
-      .finally(() => { queue.size--; });
-    this.segmentQueues.set(key, queue);
-  }
-
-  private async transcribeSegment(session: InterviewSession, speaker: 'interviewer' | 'candidate', pcm: Buffer): Promise<void> {
-    const started = Date.now();
-    try {
-      const r = await this.whisper!.transcribe(pcm16ToWav(pcm));
-      this.setTranscriptionStatus(session, true);
-      const seconds = (pcm.length / 2 / SAMPLE_RATE).toFixed(1);
-      if (r.discard) {
-        console.log(`[STT] ${speaker} ${seconds}s segment discarded (no speech; no_speech_prob ${r.noSpeechProb})`);
-        return;
-      }
-      console.log(`[STT] ${speaker} ${seconds}s → ${r.text.length} chars in ${Date.now() - started}ms${r.lowConfidence ? ' (low confidence)' : ''}`);
-      this.ingest(session, speaker, r.text, true, { source: 'stt', avgLogprob: r.avgLogprob, noSpeechProb: r.noSpeechProb, lowConfidence: r.lowConfidence });
-    } catch (err) {
-      const code = err instanceof SttError ? err.code : 'unknown';
-      console.error(`[STT] ${speaker} segment failed (${code}): ${(err as Error).message}`);
-      this.setTranscriptionStatus(session, false);
-    }
-  }
-
-  /** Tells both participants when transcription stops or resumes working. The call is unaffected. */
-  private setTranscriptionStatus(session: InterviewSession, ok: boolean): void {
-    const down = this.transcriptionDown.has(session.id);
-    if (ok === !down) return;
-    if (ok) this.transcriptionDown.delete(session.id); else this.transcriptionDown.add(session.id);
-    this.send.toSession(session.id, {
-      type: 'transcription_status',
-      sessionId: session.id,
-      status: ok ? 'ok' : 'unavailable',
-      message: ok ? 'Transcription resumed' : 'Transcription unavailable',
-    });
-  }
-
-  /** Voice activity from a participant's browser (drives the "speaking" indicator). */
-  handleSpeechActivity(client: QuestionFlowClient, msg: Record<string, unknown>): void {
-    const binding = client.binding;
-    const session = binding ? this.sessions.get(binding.sessionId) : undefined;
-    if (!binding || !session || session.status !== 'LIVE' || typeof msg.speaking !== 'boolean') return;
-    if (binding.role === 'candidate') this.noteCandidateActivity(session.id, msg.speaking);
-    this.send.toSession(session.id, { type: 'speech_activity', sessionId: session.id, speaker: binding.role, speaking: msg.speaking });
-  }
-
-  /** Streaming PCM of the sender's own microphone (Deepgram mode). Speaker = authenticated role. */
-  handleAudio(client: QuestionFlowClient, msg: Record<string, unknown>): void {
-    const binding = client.binding;
-    const session = binding ? this.sessions.get(binding.sessionId) : undefined;
-    if (!binding || !session || session.status !== 'LIVE') return;
-    if (typeof msg.data !== 'string' || msg.data.length > MAX_AUDIO_B64) return;
-
-    if (this.sttConfig.provider !== 'deepgram') {
-      if (!this.sttWarned.has(session.id)) {
-        this.sttWarned.add(session.id);
-        this.setTranscriptionStatus(session, false);
-      }
-      return;
-    }
-
-    let stt = this.stt.get(session.id);
-    if (!stt) {
-      stt = new DeepgramStreamingService({ apiKey: this.sttConfig.apiKey }, (entry) => this.onDeepgram(session.id, entry));
-      stt.ensureStreams();
-      this.stt.set(session.id, stt);
-      this.sttCheckedAt.set(session.id, Date.now());
-      console.log(`[STT] Deepgram streams started for ${session.id}`);
-    } else if (Date.now() - (this.sttCheckedAt.get(session.id) ?? 0) > 5000) {
-      // Deepgram closes idle sockets; restart at most every 5s to avoid reconnect storms.
-      this.sttCheckedAt.set(session.id, Date.now());
-      stt.ensureStreams();
-    }
-
-    const buffer = Buffer.from(msg.data, 'base64');
-    if (binding.role === 'candidate') stt.sendCandidateAudio(buffer);
-    else stt.sendInterviewerAudio(buffer);
-  }
-
-  private onDeepgram(sessionId: string, entry: TranscriptEntry): void {
+  onSpeechActivity(sessionId: string, role: ParticipantRole, speaking: boolean): void {
     const session = this.sessions.get(sessionId);
-    if (!session || !entry.text.trim() || entry.speaker === 'system') return;
-    const lowConfidence = typeof entry.confidence === 'number' && entry.confidence < 0.6;
-    this.ingest(session, entry.speaker, entry.text.trim(), entry.isFinal, { ...MANUAL, source: 'stt', lowConfidence });
+    if (!session || session.status !== 'LIVE') return;
+    if (role === 'candidate') this.noteCandidateActivity(sessionId, speaking);
+    this.send.toSession(sessionId, { type: 'speech_activity', sessionId, speaker: role, role: role.toUpperCase(), speaking });
   }
 
-  private ingest(session: InterviewSession, speaker: 'interviewer' | 'candidate', text: string, isFinal: boolean, quality: TranscriptQuality = MANUAL): void {
+  /** Entry point for STT results (partials are shown, only finals are stored). */
+  ingestTranscript(sessionId: string, role: ParticipantRole, text: string, isFinal: boolean, quality: TranscriptQuality, meta: TranscriptMeta): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    this.ingest(session, role, text.slice(0, MAX_SEGMENT_LENGTH), isFinal, quality, meta);
+  }
+
+  private ingest(session: InterviewSession, speaker: 'interviewer' | 'candidate', text: string, isFinal: boolean,
+    quality: TranscriptQuality = MANUAL, meta?: TranscriptMeta): void {
     // Paused or finished interviews accept no new transcript or answers.
     if (session.status !== 'LIVE') return;
     const current = this.current(session);
     const questionId = current?.questionId ?? null;
 
+    const participantId = meta?.participantId ?? `${speaker}_${session.id}`;
     if (!isFinal) {
-      // Partial: the person is still speaking. Displayed only, never evaluated.
-      this.send.toSession(session.id, { type: 'transcript_partial', sessionId: session.id, speaker, text, questionId });
+      // Partial: the person is still speaking. Displayed only, never stored or evaluated.
+      this.send.toSession(session.id, {
+        type: 'transcript_partial', sessionId: session.id, segmentId: meta?.segmentId ?? null,
+        participantId, speaker, role: speaker.toUpperCase(), text, questionId,
+      });
       return;
     }
 
     const segment: TranscriptSegment = {
-      id: newId('seg'),
+      id: meta?.segmentId ?? newId('seg'),
       sessionId: session.id,
       questionId,
       speaker,
@@ -576,7 +474,9 @@ export class QuestionFlow {
     };
     session.transcript.push(segment);
     if (session.transcript.length > 2000) session.transcript = session.transcript.slice(-2000);
-    this.send.toSession(session.id, { type: 'transcript_final', ...segment });
+    this.send.toSession(session.id, {
+      type: 'transcript_final', ...segment, segmentId: segment.id, participantId, role: speaker.toUpperCase(),
+    });
 
     if (speaker === 'candidate') this.noteCandidateActivity(session.id, null);
     if (speaker === 'interviewer' && current?.answerStartedAt && quality.source === 'stt' && looksLikeQuestion(text)) {
@@ -600,14 +500,6 @@ export class QuestionFlow {
   onInterviewEnded(session: InterviewSession): void {
     const current = this.current(session);
     if (current) this.finishQuestion(session, current, 'interview_ended');
-    this.stopTranscription(session.id);
-  }
-
-  stopTranscription(sessionId: string): void {
-    this.stt.get(sessionId)?.stop();
-    this.stt.delete(sessionId);
-    this.sttCheckedAt.delete(sessionId);
-    this.transcriptionDown.delete(sessionId);
   }
 
   private finishQuestion(session: InterviewSession, q: InterviewQuestion, reason: string): void {
@@ -615,7 +507,7 @@ export class QuestionFlow {
     this.candidateActivity.delete(session.id);
     q.answeredAt = Date.now();
     const hasAnswer = q.answer.trim().length > 0;
-    console.log(`[QUESTION] ${q.questionId} ended (${reason}); answer ${hasAnswer ? `${q.answer.length} chars` : 'empty'}`);
+    console.log(`[ANSWER] ${q.questionId} answer completed (${reason}); ${hasAnswer ? `${q.answer.length} chars` : 'empty'}`);
 
     this.send.toSession(session.id, { type: 'answer_completed', sessionId: session.id, questionId: q.questionId, hasAnswer });
     if (!hasAnswer) {
@@ -658,7 +550,7 @@ export class QuestionFlow {
     q.status = 'evaluating';
     q.evaluationError = null;
     this.send.toRole(session.id, 'interviewer', { type: 'evaluation_started', sessionId: session.id, questionId: q.questionId });
-    console.log(`[EVAL] ${q.questionId} evaluation started`);
+    console.log(`[AI] ${q.questionId} evaluation started`);
     const started = Date.now();
 
     try {
@@ -694,7 +586,7 @@ export class QuestionFlow {
       q.evaluation = evaluation;
       q.finalScore = q.override?.finalScore ?? evaluation.score;
       q.status = 'completed';
-      console.log(`[EVAL] ${q.questionId} completed: ${evaluation.score}/100 (${evaluation.evaluator}, ${Date.now() - started}ms)`);
+      console.log(`[AI] ${q.questionId} evaluation completed: ${evaluation.score}/100 (${evaluation.evaluator}, ${Date.now() - started}ms)`);
       this.send.toRole(session.id, 'interviewer', {
         type: 'evaluation_completed',
         sessionId: session.id,
@@ -705,7 +597,7 @@ export class QuestionFlow {
       });
     } catch (err) {
       const code = err instanceof EvaluationError ? err.code : 'unknown';
-      console.error(`[EVAL] ${q.questionId} failed (${code}, ${Date.now() - started}ms): ${(err as Error).message}`);
+      console.error(`[AI] ${q.questionId} evaluation failed (${code}, ${Date.now() - started}ms): ${(err as Error).message}`);
       q.status = 'error';
       q.evaluationError = UNAVAILABLE;
       this.send.toRole(session.id, 'interviewer', {
