@@ -19,7 +19,13 @@
 <body>
   <nav class="topnav">
     <a class="brand" href="/dashboard"><span class="brand-mark" aria-hidden="true"></span>AI Interview</a>
-    <a class="btn small" href="/dashboard">Back to interviews</a>
+    <div class="nav-right">
+      <button class="theme-toggle" id="themeBtn" aria-label="Toggle theme">
+        <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+        <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+      </button>
+      <a class="btn small" href="/dashboard">Back to interviews</a>
+    </div>
   </nav>
   <main class="page page-narrow">
     <form class="stack" id="createForm" novalidate>
@@ -70,7 +76,12 @@
         <p class="muted" id="createdSummary"></p>
       </div>
       <div class="card stack">
-        <label class="field">Candidate link — send this to the candidate
+        <div style="text-align:center;padding:8px 0">
+          <p class="muted small" style="margin-bottom:8px">Interview join code</p>
+          <span class="code-display" id="joinCode"></span>
+          <p class="muted small" style="margin-top:8px">Share this code with the candidate — they enter it on the login page</p>
+        </div>
+        <label class="field">Candidate link (alternative)
           <span class="link-row"><input id="candidateUrl" readonly><button type="button" class="btn" data-copy="candidateUrl">Copy</button></span>
         </label>
         <label class="field">Your interviewer room (requires your sign-in)
@@ -101,6 +112,13 @@
   <script>
     const $ = (id) => document.getElementById(id);
     const split = (s) => s.split(',').map((x) => x.trim()).filter(Boolean);
+    try { const t = localStorage.getItem('theme'); if (t) document.documentElement.setAttribute('data-theme', t); } catch {}
+    $('themeBtn').addEventListener('click', () => {
+      const cur = document.documentElement.getAttribute('data-theme');
+      const next = cur === 'light' ? 'dark' : 'light';
+      document.documentElement.setAttribute('data-theme', next);
+      try { localStorage.setItem('theme', next); } catch {}
+    });
 
     fetch('/api/auth/me').then((r) => r.json()).then((d) => { if (!d.user) location.replace('/login?next=/interview/new'); }).catch(() => {});
 
@@ -141,6 +159,7 @@
         if (resp.status === 401) { location.replace('/login?next=/interview/new'); return; }
         const body = await resp.json().catch(() => ({}));
         if (!resp.ok) throw new Error(body.error || 'Could not create the interview.');
+        $('joinCode').textContent = body.joinCode;
         $('candidateUrl').value = body.candidateUrl;
         $('interviewerUrl').value = body.interviewerUrl;
         $('enterRoom').href = body.interviewerUrl;

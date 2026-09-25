@@ -31,6 +31,9 @@ function setupPermissions(): void {
 let workspaceWindow: BrowserWindow | null = null;
 let assistantWindow: BrowserWindow | null = null;
 
+const SERVER_PORT = process.env.SERVER_PORT || '3001';
+const SERVER_BASE = `http://localhost:${SERVER_PORT}`;
+
 function getRendererUrl(hash: string): string {
   if (process.env.ELECTRON_RENDERER_URL) {
     return `${process.env.ELECTRON_RENDERER_URL}#${hash}`;
@@ -57,7 +60,7 @@ export function createWorkspaceWindow() {
     },
   });
 
-  workspaceWindow.loadURL(getRendererUrl('/workspace'));
+  workspaceWindow.loadURL(SERVER_BASE);
 
   workspaceWindow.on('closed', () => {
     workspaceWindow = null;
@@ -81,7 +84,7 @@ export function createAssistantWindow() {
     backgroundColor: '#0b1120',
     frame: false,
     transparent: true,
-    show: true,
+    show: false,
     skipTaskbar: true,
     alwaysOnTop: true,
     focusable: true,
@@ -95,7 +98,7 @@ export function createAssistantWindow() {
     },
   });
 
-  assistantWindow.loadURL(getRendererUrl('/assistant'));
+  assistantWindow.loadURL(`${SERVER_BASE}/room-assets/coach-overlay.html`);
   setAssistantProtection(assistantWindow, true);
 
   assistantWindow.webContents.on('did-finish-load', () => {

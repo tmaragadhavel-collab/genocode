@@ -33,6 +33,10 @@ export const CHANNELS = {
   // Window
   ASSISTANT_TOGGLE_VISIBILITY: 'ASSISTANT_TOGGLE_VISIBILITY',
   THEME_CHANGED: 'THEME_CHANGED',
+
+  // Coach overlay (workspace → assistant)
+  COACH_CONTENT: 'COACH_CONTENT',
+  COACH_STATUS: 'COACH_STATUS',
 } as const;
 
 export type ChannelName = (typeof CHANNELS)[keyof typeof CHANNELS];

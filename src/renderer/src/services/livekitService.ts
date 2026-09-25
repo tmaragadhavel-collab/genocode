@@ -8,6 +8,7 @@ import {
   LocalParticipant,
   ConnectionState,
 } from 'livekit-client';
+import { getWsAudioStats } from './wsClient';
 
 type AudioDataCallback = (source: 'system' | 'microphone', data: ArrayBuffer) => void;
 
@@ -43,8 +44,47 @@ let onVideoChange: VideoCallback | null = null;
 let interviewerPacketCount = 0;
 let candidatePacketCount = 0;
 
+/**
+ * Temporary diagnostics. `frames` counts every PCM block the AudioContext
+ * produced; `signalFrames` counts only those that were not effectively silent.
+ * A pipeline that is wired but receiving silence shows frames climbing while
+ * signalFrames stays at 0 — the distinction "TrackSubscribed fired" cannot make.
+ */
+type AudioStageStats = { frames: number; signalFrames: number; samples: number; bytes: number; peak: number };
+
+const blankStats = (): AudioStageStats => ({ frames: 0, signalFrames: 0, samples: 0, bytes: 0, peak: 0 });
+const audioStats: Record<'system' | 'microphone', AudioStageStats> = {
+  system: blankStats(),
+  microphone: blankStats(),
+};
+
 export function getAudioPacketCounts(): { interviewer: number; candidate: number } {
   return { interviewer: interviewerPacketCount, candidate: candidatePacketCount };
+}
+
+export function getAudioStats(): {
+  interviewer: AudioStageStats & { contextState: string | null; trackReadyState: string | null };
+  candidate: AudioStageStats & { contextState: string | null; trackReadyState: string | null };
+} {
+  return {
+    interviewer: {
+      ...audioStats.system,
+      contextState: interviewerProcessor?.context.state ?? null,
+      trackReadyState: interviewerAudioEl?.track.mediaStreamTrack?.readyState ?? null,
+    },
+    candidate: {
+      ...audioStats.microphone,
+      contextState: candidateProcessor?.context.state ?? null,
+      trackReadyState:
+        room?.localParticipant?.getTrackPublication(Track.Source.Microphone)?.track?.mediaStreamTrack
+          ?.readyState ?? null,
+    },
+  };
+}
+
+export function resetAudioStats(): void {
+  audioStats.system = blankStats();
+  audioStats.microphone = blankStats();
 }
 
 function float32ToInt16(float32: Float32Array): Int16Array {
@@ -77,15 +117,21 @@ function createAudioPipeline(
   processor.onaudioprocess = (event) => {
     const inputData = event.inputBuffer.getChannelData(0);
 
-    let hasSignal = false;
+    let peak = 0;
     for (let i = 0; i < inputData.length; i += 64) {
-      if (Math.abs(inputData[i]) > 0.001) {
-        hasSignal = true;
-        break;
-      }
+      const v = Math.abs(inputData[i]);
+      if (v > peak) peak = v;
     }
+    const hasSignal = peak > 0.001;
 
     const pcm16 = float32ToInt16(inputData);
+
+    const stats = audioStats[source];
+    stats.frames++;
+    if (hasSignal) stats.signalFrames++;
+    stats.samples += inputData.length;
+    stats.bytes += pcm16.byteLength;
+    if (peak > stats.peak) stats.peak = peak;
 
     if (source === 'system') {
       interviewerPacketCount++;
@@ -344,6 +390,30 @@ export async function disconnectFromRoom(): Promise<void> {
   onVideoChange = null;
   interviewerPacketCount = 0;
   candidatePacketCount = 0;
+  resetAudioStats();
+}
+
+/**
+ * Temporary diagnostics: prints the client half of the audio journey.
+ * Also reachable from DevTools as `window.audioDiag()`.
+ */
+export function reportAudioDiagnostics(): void {
+  const stats = getAudioStats();
+  const ws = getWsAudioStats();
+  const line = (label: string, s: typeof stats.interviewer, key: 'system' | 'microphone') =>
+    `[DIAG ${label}] frames=${s.frames} signal=${s.signalFrames} peak=${s.peak.toFixed(4)} `
+    + `pcmBytes=${s.bytes} ctx=${s.contextState ?? 'none'} track=${s.trackReadyState ?? 'none'} `
+    + `→ wsSent=${ws.sent[key]}/${ws.bytes[key]}B dropped=${ws.dropped[key]}`;
+  console.log(line('INTERVIEWER', stats.interviewer, 'system'));
+  console.log(line('CANDIDATE', stats.candidate, 'microphone'));
+}
+
+if (typeof window !== 'undefined') {
+  (window as unknown as { audioDiag: () => void }).audioDiag = reportAudioDiagnostics;
+  setInterval(() => {
+    const s = getAudioStats();
+    if (s.interviewer.frames || s.candidate.frames) reportAudioDiagnostics();
+  }, 5000);
 }
 
 export function isConnected(): boolean {

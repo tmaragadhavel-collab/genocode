@@ -4,12 +4,44 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="referrer" content="no-referrer">
-  <title>Sign in · AI Interview</title>
+  <title>AI Interview</title>
   <link rel="stylesheet" href="/room-assets/pages.css">
 </head>
 <body>
-  <main class="center-state" style="min-height:100vh">
+  <!-- Step 1: Role selection -->
+  <main class="center-state" id="roleSelect" style="min-height:100vh">
+    <div style="width:100%;max-width:520px;padding:0 16px">
+      <div style="text-align:center;margin-bottom:32px">
+        <span class="brand" style="font-size:20px;justify-content:center;margin-bottom:12px"><span class="brand-mark" style="width:24px;height:24px;border-radius:8px" aria-hidden="true"></span>AI Interview</span>
+        <p class="muted" style="margin-top:8px">Choose how you want to join</p>
+        <button class="theme-toggle" id="themeBtn" aria-label="Toggle theme" style="position:fixed;top:16px;right:16px">
+          <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+          <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+        </button>
+      </div>
+      <div class="role-cards">
+        <button class="role-card" id="pickInterviewer">
+          <div class="role-icon interviewer">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+          </div>
+          <span class="role-title">Interviewer</span>
+          <span class="role-desc">Sign in to create and manage interviews</span>
+        </button>
+        <button class="role-card" id="pickCandidate">
+          <div class="role-icon candidate">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>
+          </div>
+          <span class="role-title">Candidate</span>
+          <span class="role-desc">Join an interview with a code or link</span>
+        </button>
+      </div>
+    </div>
+  </main>
+
+  <!-- Step 2a: Interviewer auth -->
+  <main class="center-state" id="authView" style="min-height:100vh" hidden>
     <div class="card stack" style="width:100%;max-width:400px;text-align:left;color:var(--text)">
+      <a href="#" class="back-link" id="authBack">&larr; Back</a>
       <span class="brand"><span class="brand-mark" aria-hidden="true"></span>AI Interview</span>
       <div>
         <h1 id="title">Sign in</h1>
@@ -22,17 +54,100 @@
         <button class="btn primary block" id="submitBtn">Sign in</button>
         <p class="form-error" id="error" role="alert"></p>
       </form>
-      <p class="small muted" id="switchText">New here? <a href="#" id="switchLink">Create an interviewer account</a></p>
-      <p class="small muted">Candidates don't need an account; they join with the link they were sent.</p>
+      <p class="small muted" id="switchText">New here? <a href="#" id="switchLink">Create an account</a></p>
     </div>
   </main>
+
+  <!-- Step 2b: Candidate join -->
+  <main class="center-state" id="joinView" style="min-height:100vh" hidden>
+    <div class="card stack" style="width:100%;max-width:420px;text-align:left;color:var(--text)">
+      <a href="#" class="back-link" id="joinBack">&larr; Back</a>
+      <span class="brand"><span class="brand-mark" aria-hidden="true"></span>AI Interview</span>
+      <div>
+        <h1>Join interview</h1>
+        <p class="muted">Enter the interview code your interviewer shared with you.</p>
+      </div>
+      <form class="stack" id="joinForm" novalidate>
+        <label class="field">Interview code
+          <input class="code-input" name="code" maxlength="6" placeholder="ABC123" autocomplete="off" required autofocus>
+        </label>
+        <button class="btn primary block" id="joinBtn">Join interview</button>
+        <p class="form-error" id="joinError" role="alert"></p>
+      </form>
+      <div class="or-divider">or</div>
+      <div class="stack" style="gap:8px">
+        <p class="muted small">Paste the full interview link if you have one</p>
+        <form class="stack" id="linkForm" style="gap:8px" novalidate>
+          <input name="link" placeholder="https://... interview link" maxlength="500">
+          <button class="btn block" id="linkBtn">Join with link</button>
+          <p class="form-error" id="linkError" role="alert"></p>
+        </form>
+      </div>
+      <div class="or-divider">or</div>
+      <div style="text-align:center">
+        <button class="btn block" id="candidateSignInBtn">Sign in to view all your interviews</button>
+      </div>
+    </div>
+  </main>
+
+  <!-- Step 2c: Candidate auth -->
+  <main class="center-state" id="candidateAuthView" style="min-height:100vh" hidden>
+    <div class="card stack" style="width:100%;max-width:400px;text-align:left;color:var(--text)">
+      <a href="#" class="back-link" id="candidateAuthBack">&larr; Back</a>
+      <span class="brand"><span class="brand-mark" aria-hidden="true"></span>AI Interview</span>
+      <div>
+        <h1 id="candidateTitle">Sign in as Candidate</h1>
+        <p class="muted" id="candidateSubtitle">Sign in to see interviews scheduled for you.</p>
+      </div>
+      <form class="stack" id="candidateAuthForm" novalidate>
+        <label class="field" id="candidateNameField" hidden>Your name <input name="candidateName" autocomplete="name" maxlength="80"></label>
+        <label class="field">Email <input name="candidateEmail" type="email" autocomplete="email" required maxlength="254"></label>
+        <label class="field">Password <input name="candidatePassword" type="password" autocomplete="current-password" required minlength="8" maxlength="200"></label>
+        <button class="btn primary block" id="candidateSubmitBtn">Sign in</button>
+        <p class="form-error" id="candidateError" role="alert"></p>
+      </form>
+      <p class="small muted" id="candidateSwitchText">New here? <a href="#" id="candidateSwitchLink">Create an account</a></p>
+    </div>
+  </main>
+
   <script>
-    let mode = 'login';
     const $ = (id) => document.getElementById(id);
     const next = new URLSearchParams(location.search).get('next');
-    // Only same-site relative paths, to avoid open redirects.
     const target = next && next.startsWith('/') && !next.startsWith('//') ? next : '/dashboard';
 
+    // Theme
+    function applyTheme(t) {
+      document.documentElement.setAttribute('data-theme', t);
+      try { localStorage.setItem('theme', t); } catch {}
+    }
+    function loadTheme() {
+      try { return localStorage.getItem('theme'); } catch { return null; }
+    }
+    const saved = loadTheme();
+    if (saved) applyTheme(saved);
+    $('themeBtn').addEventListener('click', () => {
+      const cur = document.documentElement.getAttribute('data-theme');
+      applyTheme(cur === 'light' ? 'dark' : 'light');
+    });
+
+    // Auto-redirect if already logged in
+    fetch('/api/auth/me').then((r) => r.json()).then((d) => {
+      if (d.user) location.replace(d.user.role === 'candidate' ? '/candidate' : target);
+    }).catch(() => {});
+
+    function showView(id) {
+      for (const v of ['roleSelect', 'authView', 'joinView', 'candidateAuthView']) $(v).hidden = v !== id;
+    }
+
+    $('pickInterviewer').addEventListener('click', () => showView('authView'));
+    $('pickCandidate').addEventListener('click', () => showView('joinView'));
+    $('authBack').addEventListener('click', (e) => { e.preventDefault(); showView('roleSelect'); });
+    $('joinBack').addEventListener('click', (e) => { e.preventDefault(); showView('roleSelect'); });
+    $('candidateSignInBtn').addEventListener('click', () => showView('candidateAuthView'));
+    $('candidateAuthBack').addEventListener('click', (e) => { e.preventDefault(); showView('joinView'); });
+
+    // Auth
+    let mode = 'login';
     function setMode(m) {
       mode = m;
       $('title').textContent = m === 'login' ? 'Sign in' : 'Create account';
@@ -40,12 +155,10 @@
       $('nameField').hidden = m === 'login';
       document.querySelector('[name=password]').autocomplete = m === 'login' ? 'current-password' : 'new-password';
       $('switchText').firstChild.textContent = m === 'login' ? 'New here? ' : 'Already have an account? ';
-      $('switchLink').textContent = m === 'login' ? 'Create an interviewer account' : 'Sign in';
+      $('switchLink').textContent = m === 'login' ? 'Create an account' : 'Sign in';
       $('error').textContent = '';
     }
     $('switchLink').addEventListener('click', (e) => { e.preventDefault(); setMode(mode === 'login' ? 'signup' : 'login'); });
-
-    fetch('/api/auth/me').then((r) => r.json()).then((d) => { if (d.user) location.replace(target); }).catch(() => {});
 
     $('authForm').addEventListener('submit', async (e) => {
       e.preventDefault();
@@ -67,6 +180,94 @@
         $('submitBtn').disabled = false;
       }
     });
+
+    // Candidate join by code
+    const codeInput = document.querySelector('[name=code]');
+    codeInput.addEventListener('input', () => {
+      codeInput.value = codeInput.value.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    });
+
+    $('joinForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const code = codeInput.value.trim();
+      if (code.length !== 6) { $('joinError').textContent = 'Enter a 6-character code.'; return; }
+      $('joinBtn').disabled = true;
+      $('joinError').textContent = '';
+      try {
+        const resp = await fetch(`/api/interviews/lookup/${code}`);
+        const body = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(body.error || 'Interview not found.');
+        location.href = body.candidateUrl;
+      } catch (err) {
+        $('joinError').textContent = err.message === 'Failed to fetch' ? 'Could not reach the server.' : err.message;
+      } finally {
+        $('joinBtn').disabled = false;
+      }
+    });
+
+    // Candidate join by link
+    $('linkForm').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const link = document.querySelector('[name=link]').value.trim();
+      $('linkError').textContent = '';
+      if (!link) { $('linkError').textContent = 'Paste a link.'; return; }
+      try {
+        const url = new URL(link);
+        if (url.pathname.includes('/interview/')) {
+          location.href = link;
+        } else {
+          $('linkError').textContent = 'That does not look like an interview link.';
+        }
+      } catch {
+        $('linkError').textContent = 'That does not look like a valid URL.';
+      }
+    });
+
+    // Candidate auth
+    let candidateMode = 'login';
+    function setCandidateMode(m) {
+      candidateMode = m;
+      $('candidateTitle').textContent = m === 'login' ? 'Sign in as Candidate' : 'Create candidate account';
+      $('candidateSubmitBtn').textContent = m === 'login' ? 'Sign in' : 'Create account';
+      $('candidateNameField').hidden = m === 'login';
+      document.querySelector('[name=candidatePassword]').autocomplete = m === 'login' ? 'current-password' : 'new-password';
+      $('candidateSwitchText').firstChild.textContent = m === 'login' ? 'New here? ' : 'Already have an account? ';
+      $('candidateSwitchLink').textContent = m === 'login' ? 'Create an account' : 'Sign in';
+      $('candidateError').textContent = '';
+    }
+    $('candidateSwitchLink').addEventListener('click', (e) => { e.preventDefault(); setCandidateMode(candidateMode === 'login' ? 'signup' : 'login'); });
+
+    $('candidateAuthForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const form = e.target;
+      const data = {
+        email: form.candidateEmail.value,
+        password: form.candidatePassword.value,
+        name: form.candidateName?.value || '',
+        role: 'candidate',
+      };
+      $('candidateSubmitBtn').disabled = true;
+      $('candidateError').textContent = '';
+      try {
+        const resp = await fetch(`/api/auth/${candidateMode}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(data),
+        });
+        const body = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(body.error || 'Something went wrong.');
+        location.replace('/candidate');
+      } catch (err) {
+        $('candidateError').textContent = err.message === 'Failed to fetch' ? 'Could not reach the server. Check your connection and try again.' : err.message;
+      } finally {
+        $('candidateSubmitBtn').disabled = false;
+      }
+    });
+
+    // If URL has ?role=candidate, go straight to join view
+    const role = new URLSearchParams(location.search).get('role');
+    if (role === 'candidate') showView('joinView');
+    else if (role === 'interviewer') showView('authView');
   </script>
 </body>
 </html>

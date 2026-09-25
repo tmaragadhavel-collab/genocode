@@ -39,4 +39,21 @@ export function registerIpcHandlers() {
     });
     return { theme };
   });
+
+  ipcMain.handle('COACH_CONTENT', (_event, data: { html?: string; clear?: boolean }) => {
+    const assistantWindow = getAssistantWindow();
+    if (!assistantWindow) return { ok: false };
+    assistantWindow.webContents.send('COACH_CONTENT', data);
+    if (data.html && !assistantWindow.isVisible()) {
+      assistantWindow.show();
+    }
+    return { ok: true };
+  });
+
+  ipcMain.handle('COACH_STATUS', (_event, data: { connected: boolean; text?: string }) => {
+    const assistantWindow = getAssistantWindow();
+    if (!assistantWindow) return { ok: false };
+    assistantWindow.webContents.send('COACH_STATUS', data);
+    return { ok: true };
+  });
 }

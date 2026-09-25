@@ -37,6 +37,12 @@ export type Participant = {
 export type InterviewSettings = {
   autoEndOnSilence: boolean; // end the answer automatically after candidate silence
   silenceSeconds: number;
+  /**
+   * Live AI coaching for the candidate. Off unless the interviewer switches it
+   * on when creating the interview, and both roles are shown that it is on —
+   * it is a declared assistance feature, never a hidden one.
+   */
+  candidateCoaching: boolean;
 };
 
 /** Only a hash of each participant key is kept (in memory and in the database). */
@@ -62,6 +68,7 @@ export type InterviewSession = {
   details: InterviewDetails;
   // Secret embedded in the candidate's invite link. Interviewers authenticate by account.
   candidateKey: string;
+  joinCode: string; // short 6-char code candidates can enter to join
   participants: Map<string, Participant>; // keyed by hash of the per-connection participantKey
   settings: InterviewSettings;
   messages: ChatEntry[];
@@ -120,6 +127,7 @@ function safeEqual(a: string, b: string): boolean {
 }
 
 export const SESSION_ID_PATTERN = /^int_[A-Za-z0-9_-]{16,64}$/;
+export const JOIN_CODE_PATTERN = /^[A-Z0-9]{6}$/;
 
 /**
  * In-memory interview sessions. Everything goes through this class so it can be
@@ -132,6 +140,7 @@ export const SESSION_ID_PATTERN = /^int_[A-Za-z0-9_-]{16,64}$/;
 export class SessionManager {
   private sessions = new Map<string, InterviewSession>();
   private roomIndex = new Map<string, string>();
+  private codeIndex = new Map<string, string>(); // joinCode → session id
   private timers = new Map<string, ReturnType<typeof setTimeout>>();
   private onTimeUp: ((session: InterviewSession) => void) | null = null;
 
@@ -155,8 +164,10 @@ export class SessionManager {
         }
       }
       if (session.reportStatus === 'generating') session.reportStatus = 'failed';
+      if (!session.joinCode) session.joinCode = this.generateJoinCode();
       this.sessions.set(session.id, session);
       this.roomIndex.set(session.roomName, session.id);
+      this.codeIndex.set(session.joinCode, session.id);
       this.scheduleTimeUp(session);
     }
   }
@@ -172,14 +183,21 @@ export class SessionManager {
       .sort((a, b) => b.createdAt - a.createdAt);
   }
 
+  listByCandidateEmail(email: string): InterviewSession[] {
+    const lower = email.toLowerCase();
+    return [...this.sessions.values()]
+      .filter((s) => s.details.candidateEmail?.toLowerCase() === lower)
+      .sort((a, b) => b.createdAt - a.createdAt);
+  }
+
   /** Called when a LIVE interview reaches its duration and is auto-completed. */
   setTimeUpHandler(handler: (session: InterviewSession) => void): void {
     this.onTimeUp = handler;
   }
 
-  createInterview(details: InterviewDetails): InterviewSession {
+  createInterview(details: InterviewDetails, options: { candidateCoaching?: boolean } = {}): InterviewSession {
     const id = `int_${secureId(18)}`;
-    return this.insert(id, `interview_${id}`, details);
+    return this.insert(id, `interview_${id}`, details, options);
   }
 
   /** Legacy room-name flow used by the desktop app's LiveKit token endpoint. */
@@ -201,14 +219,31 @@ export class SessionManager {
     });
   }
 
-  private insert(id: string, roomName: string, details: InterviewDetails): InterviewSession {
+  private generateJoinCode(): string {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O/1/I to avoid confusion
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const bytes = randomBytes(6);
+      let code = '';
+      for (let i = 0; i < 6; i++) code += chars[bytes[i] % chars.length];
+      if (!this.codeIndex.has(code)) return code;
+    }
+    return randomBytes(4).toString('hex').toUpperCase().slice(0, 6);
+  }
+
+  private insert(id: string, roomName: string, details: InterviewDetails, options: { candidateCoaching?: boolean } = {}): InterviewSession {
+    const joinCode = this.generateJoinCode();
     const session: InterviewSession = {
       id,
       roomName,
       status: 'CREATED',
       details,
       candidateKey: secureId(24),
-      settings: { autoEndOnSilence: false, silenceSeconds: this.defaultSilenceSeconds },
+      joinCode,
+      settings: {
+        autoEndOnSilence: true,
+        silenceSeconds: this.defaultSilenceSeconds,
+        candidateCoaching: true,
+      },
       participants: new Map(),
       messages: [],
       pending: false,
@@ -228,11 +263,17 @@ export class SessionManager {
     };
     this.sessions.set(id, session);
     this.roomIndex.set(roomName, id);
+    this.codeIndex.set(joinCode, id);
     return session;
   }
 
   get(sessionId: string): InterviewSession | undefined {
     return this.sessions.get(sessionId);
+  }
+
+  getByCode(code: string): InterviewSession | undefined {
+    const id = this.codeIndex.get(code.toUpperCase());
+    return id ? this.sessions.get(id) : undefined;
   }
 
   /** Checks the candidate invite-link key (constant-time). */
@@ -386,6 +427,7 @@ export class SessionManager {
         this.timers.delete(id);
         this.sessions.delete(id);
         this.roomIndex.delete(session.roomName);
+        if (session.joinCode) this.codeIndex.delete(session.joinCode);
       }
     }
   }

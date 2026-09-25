@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="referrer" content="no-referrer">
+  <title>My Interviews · AI Interview</title>
+  <link rel="stylesheet" href="/room-assets/pages.css">
+</head>
+<body>
+  <nav class="topnav">
+    <a class="brand" href="/candidate"><span class="brand-mark" aria-hidden="true"></span>AI Interview</a>
+    <div class="nav-right">
+      <span class="muted small hide-sm" id="who"></span>
+      <button class="theme-toggle" id="themeBtn" aria-label="Toggle theme">
+        <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+        <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+      </button>
+      <button class="btn small" id="logout">Sign out</button>
+    </div>
+  </nav>
+  <main class="page">
+    <div class="page-head">
+      <div>
+        <h1>My Interviews</h1>
+        <p class="muted">View and join interviews you have been invited to.</p>
+      </div>
+    </div>
+
+    <!-- Quick join by code -->
+    <div class="card" style="margin-bottom:24px">
+      <div style="padding:20px">
+        <h3 style="margin:0 0 12px">Join with code</h3>
+        <form id="joinForm" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+          <label class="field" style="margin:0;flex:1;min-width:140px">Interview code
+            <input class="code-input" name="code" maxlength="6" placeholder="ABC123" autocomplete="off" required style="text-transform:uppercase">
+          </label>
+          <button class="btn primary" id="joinBtn" type="submit">Join</button>
+        </form>
+        <p class="form-error" id="joinError" role="alert" style="margin-top:8px"></p>
+      </div>
+    </div>
+
+    <div class="card" id="listCard">
+      <div class="center-state" id="loading" style="min-height:160px"><span class="spinner"></span>Loading interviews…</div>
+      <div class="center-state" id="empty" style="min-height:160px" hidden>
+        <p>No interviews found for your email.</p>
+        <p class="muted small">When an interviewer schedules an interview with your email, it will appear here.</p>
+      </div>
+      <div class="notice error" id="loadError" hidden></div>
+      <div style="overflow-x:auto"><table class="table" id="table" hidden>
+        <thead><tr><th>Position</th><th>Interviewer</th><th>Status</th><th class="hide-sm">Scheduled</th><th class="hide-sm">Duration</th><th></th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table></div>
+    </div>
+  </main>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const el = (tag, props = {}, ...kids) => { const n = Object.assign(document.createElement(tag), props); n.append(...kids); return n; };
+    try { const t = localStorage.getItem('theme'); if (t) document.documentElement.setAttribute('data-theme', t); } catch {}
+    $('themeBtn').addEventListener('click', () => {
+      const cur = document.documentElement.getAttribute('data-theme');
+      const next = cur === 'light' ? 'dark' : 'light';
+      document.documentElement.setAttribute('data-theme', next);
+      try { localStorage.setItem('theme', next); } catch {};
+    });
+
+    // Join by code
+    const codeInput = document.querySelector('[name=code]');
+    codeInput.addEventListener('input', () => {
+      codeInput.value = codeInput.value.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    });
+    $('joinForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const code = codeInput.value.trim();
+      if (code.length !== 6) { $('joinError').textContent = 'Enter a 6-character code.'; return; }
+      $('joinBtn').disabled = true;
+      $('joinError').textContent = '';
+      try {
+        const resp = await fetch(`/api/interviews/lookup/${code}`);
+        const body = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(body.error || 'Interview not found.');
+        location.href = body.candidateUrl;
+      } catch (err) {
+        $('joinError').textContent = err.message === 'Failed to fetch' ? 'Could not reach the server.' : err.message;
+      } finally {
+        $('joinBtn').disabled = false;
+      }
+    });
+
+    async function load() {
+      const resp = await fetch('/api/candidate/interviews');
+      if (resp.status === 401) { location.replace('/login?role=candidate'); return; }
+      $('loading').hidden = true;
+      if (!resp.ok) {
+        $('loadError').hidden = false;
+        $('loadError').textContent = 'Could not load interviews. Refresh the page to try again.';
+        return;
+      }
+      const { interviews } = await resp.json();
+      if (!interviews.length) { $('empty').hidden = false; return; }
+      $('table').hidden = false;
+      $('rows').replaceChildren(...interviews.map((iv) => {
+        const actions = el('td', { style: 'text-align:right;white-space:nowrap' });
+        if (iv.status === 'COMPLETED' || iv.status === 'CANCELLED') {
+          actions.append(el('span', { className: 'pill COMPLETED' }, 'Done'));
+        } else {
+          actions.append(el('a', { className: 'btn small primary', href: iv.candidateUrl }, 'Join'));
+        }
+        const statusLabel = { CREATED: 'scheduled', WAITING: 'waiting', LIVE: 'live', PAUSED: 'paused', COMPLETED: 'completed', CANCELLED: 'cancelled' }[iv.status] || iv.status.toLowerCase();
+        return el('tr', {},
+          el('td', {}, iv.position),
+          el('td', {}, iv.interviewerName),
+          el('td', {}, el('span', { className: `pill ${iv.status}` }, statusLabel)),
+          el('td', { className: 'hide-sm muted' }, new Date(iv.createdAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })),
+          el('td', { className: 'hide-sm muted' }, `${iv.durationMinutes} min`),
+          actions);
+      }));
+    }
+
+    fetch('/api/auth/me').then((r) => r.json()).then((d) => {
+      if (!d.user) { location.replace('/login?role=candidate'); return; }
+      $('who').textContent = `${d.user.name} · ${d.user.email}`;
+    }).catch(() => {});
+    $('logout').addEventListener('click', async () => {
+      await fetch('/api/auth/logout', { method: 'POST' });
+      location.replace('/login');
+    });
+    load().catch(() => {
+      $('loading').hidden = true;
+      $('loadError').hidden = false;
+      $('loadError').textContent = 'Could not reach the server. Refresh the page to try again.';
+    });
+  </script>
+</body>
+</html>

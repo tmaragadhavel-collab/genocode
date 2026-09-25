@@ -136,6 +136,60 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 }
 .tab:hover { color: var(--text); background: rgba(255, 255, 255, 0.04); }
 .tab[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
+.tab.ss-hidden, .ss-hidden { display: none !important; }
+
+/* Screen-share popup placeholder */
+.popup-notice {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 8px; padding: 32px 16px; text-align: center;
+}
+.popup-notice-icon { font-size: 32px; line-height: 1; }
+.popup-notice p { margin: 0; line-height: 1.4; }
+.popup-notice-sub { font-size: 12px; color: var(--muted); }
+.popup-notice-btn {
+  margin-top: 8px; padding: 8px 18px; border-radius: 8px;
+  background: var(--accent-strong); color: #fff; font-weight: 600;
+  font-size: 13px; cursor: pointer; border: none;
+}
+.popup-notice-btn:hover { background: var(--accent); }
+.popout-btn {
+  margin-left: auto; padding: 2px 6px; border-radius: 4px;
+  font-size: 14px; line-height: 1; color: var(--muted); cursor: pointer;
+  background: none; border: 1px solid var(--border);
+}
+.popout-btn:hover { color: var(--text); background: rgba(255,255,255,.06); }
+
+/* ---------- Floating coaching overlay (screen-share safe) ---------- */
+.coach-float {
+  position: fixed; bottom: 80px; right: 16px; z-index: 10000;
+  width: 340px; max-height: 420px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); box-shadow: 0 8px 32px rgba(0,0,0,.5);
+  display: flex; flex-direction: column; overflow: hidden;
+}
+.coach-float-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 14px; background: var(--surface-2);
+  border-bottom: 1px solid var(--border); cursor: grab;
+}
+.coach-float-title {
+  font-weight: 700; font-size: 13px; letter-spacing: 0.04em;
+  color: var(--accent);
+}
+.coach-float-toggle {
+  font-size: 12px; color: var(--muted); padding: 2px 6px;
+  border-radius: 4px; transition: transform .15s;
+}
+.coach-float-toggle:hover { color: var(--text); }
+.coach-float.collapsed .coach-float-toggle { transform: rotate(-90deg); }
+.coach-float.collapsed .coach-float-body { display: none; }
+.coach-float-body {
+  padding: 12px; overflow-y: auto; max-height: 360px;
+  display: flex; flex-direction: column; gap: 10px;
+}
+@media (max-width: 500px) {
+  .coach-float { width: calc(100vw - 32px); right: 16px; bottom: 70px; }
+}
 .tab-badge {
   display: inline-flex; align-items: center; justify-content: center; min-width: 16px; height: 16px; padding: 0 4px;
   margin-left: 6px; border-radius: 8px; background: var(--accent-strong); color: #fff; font-size: 10px; vertical-align: 1px;
@@ -304,6 +358,7 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35); animation: toast-in 0.2s ease-out; max-width: min(90vw, 480px);
 }
 .toast.error { background: #ffd9da; color: #5c1013; }
+.toast.warn { background: #fff3cd; color: #664d03; }
 @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 .audio-unlock {
   position: fixed; top: 72px; left: 50%; transform: translateX(-50%); z-index: 30;
@@ -365,3 +420,70 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 .seg-actions { margin-top: 2px; }
 button.pill.rec { border: none; font: inherit; font-size: 12px; font-weight: 600; cursor: default; }
 button.pill.rec:not(:disabled) { cursor: pointer; text-decoration: underline; }
+
+/* --- Candidate AI coach (candidate role, opt-in per interview) --- */
+.pill.coach { background: rgba(122, 162, 255, 0.16); color: #9db6ff; }
+
+#coachBody { display: flex; flex-direction: column; gap: 10px; }
+.coach-card { background: var(--surface-2); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 6px; }
+.coach-q-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); font-weight: 700; }
+.coach-q { font-weight: 600; line-height: 1.4; margin: 0; }
+.coach-status { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+.coach-status.error { color: var(--warning); }
+
+.coach-section { background: var(--surface-2); border-radius: 12px; padding: 12px; }
+.coach-section h4 {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em;
+  color: var(--muted); font-weight: 700; margin: 0 0 6px;
+}
+.coach-hints { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
+.coach-hints li { line-height: 1.45; }
+.coach-line { margin: 0; line-height: 1.45; }
+
+.coach-history { background: var(--surface-2); border-radius: 12px; padding: 12px; }
+.coach-history h4 {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em;
+  color: var(--muted); font-weight: 700; margin: 0 0 6px;
+}
+.coach-history ol { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
+.coach-history .linkish {
+  background: none; border: 0; padding: 0; text-align: left; cursor: pointer;
+  color: var(--muted); font: inherit; line-height: 1.4;
+}
+.coach-history .linkish:hover, .coach-history .linkish.on { color: var(--text); }
+
+/* --- Candidate answer feedback (candidate role, practice interviews only) --- */
+#feedbackBody { display: flex; flex-direction: column; gap: 10px; }
+.fb-card, .fb-section, .fb-history { background: var(--surface-2); border-radius: 12px; padding: 12px; }
+.fb-q-label, .fb-section h4, .fb-history h4 {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em;
+  color: var(--muted); font-weight: 700; margin: 0 0 6px;
+}
+.fb-q { font-weight: 600; line-height: 1.4; margin: 0; }
+.fb-answer { margin: 0; line-height: 1.45; color: var(--muted); }
+.fb-status { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+.fb-status.error { color: var(--warning); }
+
+.fb-overall { flex-direction: row; align-items: center; justify-content: space-between; display: flex; }
+.fb-score { display: flex; align-items: baseline; gap: 4px; }
+.fb-score-value { font-size: 28px; font-weight: 700; line-height: 1; }
+.fb-score-max { font-size: 12px; color: var(--muted); }
+
+.fb-dim { display: grid; grid-template-columns: 96px 1fr 28px 30px; align-items: center; gap: 8px; margin-bottom: 5px; }
+.fb-dim-label { font-size: 12px; color: var(--muted); }
+.fb-bar { height: 6px; border-radius: 3px; background: rgba(255, 255, 255, 0.08); overflow: hidden; }
+.fb-bar-fill { display: block; height: 100%; background: var(--accent, #8b93ff); border-radius: 3px; }
+.fb-dim-value { font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; }
+.fb-dim-weight { font-size: 11px; color: var(--muted); text-align: right; }
+
+.fb-list { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
+.fb-list li { line-height: 1.45; }
+.fb-line { margin: 0; line-height: 1.45; }
+
+.fb-history ol { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 5px; }
+.fb-history .linkish {
+  background: none; border: 0; padding: 0; text-align: left; cursor: pointer;
+  color: var(--muted); font: inherit; line-height: 1.4;
+}
+.fb-history .linkish:hover, .fb-history .linkish.on { color: var(--text); }
+.fb-flag { font-size: 11px; color: var(--muted); margin-left: 6px; }

@@ -12,6 +12,10 @@
     <a class="brand" href="/dashboard"><span class="brand-mark" aria-hidden="true"></span>AI Interview</a>
     <div class="nav-right">
       <span class="muted small hide-sm" id="who"></span>
+      <button class="theme-toggle" id="themeBtn" aria-label="Toggle theme">
+        <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+        <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+      </button>
       <button class="btn small" id="logout">Sign out</button>
     </div>
   </nav>
@@ -32,7 +36,7 @@
       </div>
       <div class="notice error" id="loadError" hidden></div>
       <div style="overflow-x:auto"><table class="table" id="table" hidden>
-        <thead><tr><th>Candidate</th><th>Position</th><th>Status</th><th class="hide-sm">Created</th><th>Score</th><th></th></tr></thead>
+        <thead><tr><th>Candidate</th><th>Position</th><th class="hide-sm">Code</th><th>Status</th><th class="hide-sm">Created</th><th>Score</th><th></th></tr></thead>
         <tbody id="rows"></tbody>
       </table></div>
     </div>
@@ -40,6 +44,13 @@
   <script>
     const $ = (id) => document.getElementById(id);
     const el = (tag, props = {}, ...kids) => { const n = Object.assign(document.createElement(tag), props); n.append(...kids); return n; };
+    try { const t = localStorage.getItem('theme'); if (t) document.documentElement.setAttribute('data-theme', t); } catch {}
+    $('themeBtn').addEventListener('click', () => {
+      const cur = document.documentElement.getAttribute('data-theme');
+      const next = cur === 'light' ? 'dark' : 'light';
+      document.documentElement.setAttribute('data-theme', next);
+      try { localStorage.setItem('theme', next); } catch {}
+    });
 
     async function load() {
       const resp = await fetch('/api/interviews');
@@ -66,9 +77,22 @@
           });
           actions.append(copy, ' ', el('a', { className: 'btn small primary', href: iv.interviewerUrl }, 'Enter room'));
         }
+        const codeCell = el('td', { className: 'hide-sm' });
+        if (iv.joinCode && iv.status !== 'COMPLETED' && iv.status !== 'CANCELLED') {
+          const codeTxt = el('code', { style: 'font-weight:700;letter-spacing:0.1em;color:var(--accent);cursor:pointer', title: 'Click to copy' }, iv.joinCode);
+          codeTxt.addEventListener('click', async () => {
+            try { await navigator.clipboard.writeText(iv.joinCode); } catch {}
+            codeTxt.textContent = 'Copied!';
+            setTimeout(() => { codeTxt.textContent = iv.joinCode; }, 1200);
+          });
+          codeCell.append(codeTxt);
+        } else {
+          codeCell.append('—');
+        }
         return el('tr', {},
           el('td', {}, iv.candidateName),
           el('td', {}, iv.position),
+          codeCell,
           el('td', {}, el('span', { className: `pill ${iv.status}` }, iv.status.toLowerCase())),
           el('td', { className: 'hide-sm muted' }, new Date(iv.createdAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })),
           el('td', { className: 'num' }, iv.averageScore === null ? '—' : `${iv.averageScore}/100`),

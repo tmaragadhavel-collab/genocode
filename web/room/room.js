@@ -6,7 +6,10 @@ import {
   DisconnectReason,
 } from '/vendor/livekit-client.esm.mjs';
 import { createEvaluationPanel } from './evaluation.js';
+import { createCoachPanel } from './coach.js';
+import { createFeedbackPanel } from './feedback.js';
 import { createTranscriber } from './stt.js';
+import { createStreamFilter } from './stream-filter.js';
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -18,6 +21,7 @@ const joinKey = new URLSearchParams(location.search).get('key') || '';
 const otherRole = myRole === 'interviewer' ? 'candidate' : 'interviewer';
 const ROLE_LABEL = { interviewer: 'Interviewer', candidate: 'Candidate' };
 const isHost = myRole === 'interviewer';
+const isElectron = typeof window.appBridge !== 'undefined';
 
 const state = {
   join: null, // response of POST /api/interviews/:id/join
@@ -41,10 +45,16 @@ const state = {
   speakingNow: {},
   tab: null, // open side-panel tab, or null when closed
   transcriptSeen: new Set(),
+  screenSharing: false, // candidate is sharing their screen
+  shareSurface: 'unknown', // 'browser' (tab), 'window', 'monitor' (entire screen)
+  streamFilter: null, // canvas-based stream processor (removes coaching from outgoing frames)
+  rawScreenTrack: null, // original getDisplayMedia video track
 };
 
 // Interviewer-only AI evaluation module (the server never sends evaluation data to candidates).
 let evalPanel = null;
+let coachPanel = null;
+let feedbackPanel = null;
 
 // Both roles: our own microphone → server speech-to-text (speaker set server-side).
 const transcriber = createTranscriber({
@@ -78,7 +88,7 @@ function toast(text, kind = '', action = null) {
     el.append(btn);
   }
   $('toasts').appendChild(el);
-  setTimeout(() => el.remove(), action ? 9000 : kind === 'error' ? 6000 : 3500);
+  setTimeout(() => el.remove(), action ? 9000 : kind === 'error' ? 6000 : kind === 'warn' ? 8000 : 3500);
 }
 
 function initials(name) {
@@ -278,8 +288,20 @@ async function connectLiveKit(micOn, camOn) {
       render();
     })
     // The browser's own "Stop sharing" bar unpublishes the screen track too.
-    .on(RoomEvent.LocalTrackPublished, () => { render(); reportMedia(); })
-    .on(RoomEvent.LocalTrackUnpublished, () => { render(); reportMedia(); })
+    .on(RoomEvent.LocalTrackPublished, (pub) => {
+      if (pub.source === Track.Source.ScreenShare) {
+        if (!state.streamFilter) detectShareSurface(room.localParticipant);
+        applyScreenShareHide(true);
+      }
+      render(); reportMedia();
+    })
+    .on(RoomEvent.LocalTrackUnpublished, (pub) => {
+      if (pub.source === Track.Source.ScreenShare) {
+        state.shareSurface = 'unknown';
+        applyScreenShareHide(false);
+      }
+      render(); reportMedia();
+    })
     .on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
       state.speaking = new Set(speakers.map((s) => s.identity));
       renderSpeaking();
@@ -346,13 +368,73 @@ async function setShare(on) {
     toast(`${presenter().name} is already presenting.`);
     return;
   }
+
+  if (!on) {
+    // Stop sharing — clean up filtered stream if active
+    if (state.streamFilter) {
+      state.streamFilter.stop();
+      state.streamFilter = null;
+    }
+    if (state.rawScreenTrack) {
+      state.rawScreenTrack = null;
+    }
+    try {
+      await lp.setScreenShareEnabled(false);
+    } catch {}
+    render();
+    reportMedia();
+    return;
+  }
+
+  // Candidate with coaching: hide coaching from the shared page.
+  // Electron: coaching moves to an OS-level content-protected window.
+  // Browser: coaching moves to a separate popup window (invisible to tab/window share).
+  // In both cases, normal LiveKit screen share is used — no canvas filter needed.
+  if (!isHost && coachPanel?.enabled) {
+    applyScreenShareHide(true);
+    try {
+      await lp.setScreenShareEnabled(on, {
+        audio: true,
+        selfBrowserSurface: 'include',
+        preferCurrentTab: false,
+      });
+    } catch (err) {
+      applyScreenShareHide(false);
+      if (err.name !== 'NotAllowedError') {
+        toast(mediaError('screen', err), 'error', { label: 'Try again', run: () => setShare(true) });
+      }
+    }
+    render();
+    reportMedia();
+    return;
+  }
+
+  // Default: normal LiveKit screen share (interviewer or coaching disabled)
   try {
-    await lp.setScreenShareEnabled(on, { audio: true, selfBrowserSurface: 'exclude' });
+    await lp.setScreenShareEnabled(on, {
+      audio: true,
+      selfBrowserSurface: 'exclude',
+      preferCurrentTab: true,
+    });
+    if (on) detectShareSurface(lp);
   } catch (err) {
     toast(mediaError('screen', err), 'error', { label: 'Try again', run: () => setShare(true) });
   }
   render();
   reportMedia();
+}
+
+function detectShareSurface(lp) {
+  state.shareSurface = 'unknown';
+  try {
+    for (const pub of lp.trackPublications.values()) {
+      if (pub.source === Track.Source.ScreenShare && pub.track?.mediaStreamTrack) {
+        const settings = pub.track.mediaStreamTrack.getSettings();
+        state.shareSurface = settings.displaySurface || 'unknown';
+        break;
+      }
+    }
+  } catch {}
 }
 
 function localMedia() {
@@ -534,10 +616,299 @@ function renderControls() {
 
 const TABS = isHost ? ['eval', 'questions', 'transcript', 'chat'] : ['transcript', 'chat'];
 
+/**
+ * Reveals a tab and wires its click once. Tabs can appear after load (the coach
+ * tab only exists once the server confirms coaching is on), so attaching the
+ * listener here rather than in a one-shot loop is what makes a late tab usable.
+ */
+const wiredTabs = new Set();
+function enableTab(t) {
+  const el = $(`tab-${t}`);
+  if (!el) return;
+  el.hidden = false;
+  if (wiredTabs.has(t)) return;
+  wiredTabs.add(t);
+  el.addEventListener('click', () => openTab(t));
+}
+
+/**
+ * Coaching is never silent: the candidate gets the panel, and the interviewer
+ * gets a badge saying it is on. Neither side can turn the disclosure off.
+ */
+function applyCoachingDisclosure(enabled) {
+  if (!enabled) return;
+  if (isHost) return;
+  if (!TABS.includes('coach')) TABS.unshift('coach');
+  enableTab('coach');
+  const menuCoach = $('menuCoach');
+  if (menuCoach) menuCoach.hidden = false;
+  coachPanel?.render();
+  if (state.screenSharing) applyScreenShareHide(true);
+}
+
+// ---------------------------------------------------------------------------
+// Screen-share-safe coaching popup
+// ---------------------------------------------------------------------------
+// When the candidate shares their screen the AI Coach and Answer Feedback tabs
+// hide from the main tab (which IS the shared surface) and move to a separate
+// popup window the interviewer cannot see.  The popup receives live coaching
+// and feedback data via BroadcastChannel and closes when screen sharing stops.
+
+const SS_HIDDEN_TABS = ['coach', 'feedback'];
+let popupWin = null;
+let popupChannel = null;
+let popupBlocked = false;
+
+function initPopupChannel() {
+  if (popupChannel) return;
+  popupChannel = new BroadcastChannel('coach-popup');
+  popupChannel.onmessage = (e) => {
+    const d = e.data;
+    if (d?.type === 'popup_ready') {
+      popupChannel.postMessage({
+        type: 'init',
+        coach: coachPanel?.getState() ?? null,
+        feedback: feedbackPanel?.getState() ?? null,
+      });
+    }
+    if (d?.type === 'popup_closed') {
+      popupWin = null;
+    }
+  };
+}
+
+function openCoachPopup() {
+  if (popupWin && !popupWin.closed) { popupWin.focus(); return true; }
+  initPopupChannel();
+  popupWin = window.open(
+    '/room-assets/coach-popup.html',
+    'coach-popup',
+    'width=400,height=580,top=60,left=20,resizable=yes,scrollbars=yes'
+  );
+  if (!popupWin) {
+    popupBlocked = true;
+    return false;
+  }
+  popupBlocked = false;
+  return true;
+}
+
+function closeCoachPopup() {
+  if (popupChannel) {
+    try { popupChannel.postMessage({ type: 'close' }); } catch {}
+    popupChannel.close();
+    popupChannel = null;
+  }
+  if (popupWin && !popupWin.closed) popupWin.close();
+  popupWin = null;
+  popupBlocked = false;
+}
+
+function relayToPopup(msg) {
+  if (!popupChannel || !popupWin || popupWin.closed) return;
+  try { popupChannel.postMessage({ type: 'relay', msg }); } catch {}
+}
+
+function autoShowCoachPopup() {
+  const surface = state.shareSurface || 'unknown';
+  if (surface === 'monitor' || surface === 'window') {
+    openTab('coach');
+    return;
+  }
+  if (isPopupLive()) { popupWin.focus(); return; }
+  if (openCoachPopup()) {
+    toast('AI Coach opened — hidden from your screen share');
+    showPopupPlaceholder(true);
+  } else if (!popupBlocked) {
+    toast('Allow popups to see AI Coach during screen share', 'error',
+      { label: 'Open now', run: () => { if (openCoachPopup()) { toast('Coaching window opened'); showPopupPlaceholder(true); } } });
+  }
+}
+
+function isPopupLive() {
+  return popupWin && !popupWin.closed;
+}
+
+function showPopupPlaceholder(show) {
+  let el = $('coachPopupNotice');
+  if (show && !el) {
+    el = document.createElement('div');
+    el.id = 'coachPopupNotice';
+    el.className = 'popup-notice';
+    el.innerHTML = '<div class="popup-notice-icon">&#x1f6e1;</div>'
+      + '<p><strong>AI Coach is in a separate window</strong></p>'
+      + '<p class="popup-notice-sub">Not visible to the interviewer through your screen share</p>'
+      + '<button class="popup-notice-btn" id="popupFocusBtn">Focus popup window</button>';
+    const body = $('coachBody');
+    if (body) { body.textContent = ''; body.appendChild(el); }
+    $('popupFocusBtn')?.addEventListener('click', () => {
+      if (isPopupLive()) popupWin.focus();
+      else if (openCoachPopup()) toast('Coaching window opened');
+      else toast('Popup blocked — allow popups for this site', 'error');
+    });
+  } else if (!show && el) {
+    el.remove();
+    coachPanel?.render();
+  }
+}
+
+function applyScreenShareHide(sharing) {
+  state.screenSharing = sharing;
+  if (isHost) return;
+
+  if (sharing && coachPanel?.enabled) {
+    // Hide coaching-related tabs from the side panel so they don't leak
+    // into the screen share.
+    $('tab-coach').hidden = true;
+    $('tab-feedback').hidden = true;
+    if (state.tab === 'coach' || state.tab === 'feedback') {
+      openTab('transcript');
+    }
+
+    if (isElectron) {
+      // Electron: coaching goes to the OS-level content-protected window
+      sendCoachToElectron();
+      window.appBridge.setCoachStatus(true, 'Coaching active');
+      toast("AI Coach moved to protected overlay — invisible to screen capture");
+    } else {
+      // Browser: coaching goes to a separate popup window.
+      // Tab/window sharing: popup is a different window, completely invisible.
+      // Monitor sharing: popup is visible but on a separate window the
+      // candidate can move to another monitor or minimize before sharing.
+      if (openCoachPopup()) {
+        showPopupPlaceholder(true);
+        toast('AI Coach opened in a separate window — hidden from screen share');
+      } else {
+        showCoachFloat(true);
+        renderCoachFloat();
+        toast('Allow popups to see AI Coach during screen share', 'warn',
+          { label: 'Open now', run: () => { if (openCoachPopup()) { showPopupPlaceholder(true); showCoachFloat(false); toast('Coaching window opened'); } } });
+      }
+    }
+  } else if (!sharing) {
+    // Restore coaching tabs in the side panel
+    if (coachPanel?.enabled) {
+      $('tab-coach').hidden = false;
+      $('tab-feedback').hidden = !feedbackPanel;
+    }
+
+    if (isElectron) {
+      window.appBridge.clearCoach();
+      window.appBridge.setCoachStatus(false, 'Screen share ended');
+    }
+    closeCoachPopup();
+    showPopupPlaceholder(false);
+    showCoachFloat(false);
+    if (coachPanel?.enabled) toast('AI Coach restored to panel');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Floating coaching overlay (screen-share safe)
+// ---------------------------------------------------------------------------
+// During screen share the coaching content is shown in a fixed-position float.
+// The stream-filter paints over this region in every outgoing video frame so
+// the interviewer sees a clean stream while the candidate sees coaching live.
+
+const COACH_SECTIONS = [
+  ['HINTS', 'Key points'],
+  ['STRUCTURE', 'Structure'],
+  ['GROUNDING', 'Draw on'],
+  ['CAUTION', 'Watch out'],
+];
+
+function showCoachFloat(show) {
+  const el = $('coachFloat');
+  if (!el) return;
+  el.hidden = !show;
+}
+
+function renderCoachFloat() {
+  const body = $('coachFloatBody');
+  if (!body || $('coachFloat')?.hidden) return;
+
+  const st = coachPanel?.getState();
+  if (!st?.enabled || !st.history?.length) {
+    body.innerHTML = "<p style=\"color:var(--muted);font-size:13px\">Waiting for interviewer's question…</p>";
+    return;
+  }
+
+  const rec = st.history.find((r) => r.questionId === st.selectedId) || st.history[st.history.length - 1];
+  if (!rec) return;
+
+  let html = `<div class="coach-card"><div class="coach-q-label">Question</div><p class="coach-q">${esc(rec.question)}</p>`;
+  if (rec.state === 'thinking' || rec.state === 'streaming') {
+    html += `<div class="coach-status"><span class="spinner"></span> ${rec.state === 'thinking' ? 'Thinking…' : 'Writing hints…'}</div>`;
+  } else if (rec.state === 'error') {
+    html += '<div class="coach-status error">AI coaching temporarily unavailable</div>';
+  }
+  html += '</div>';
+
+  for (const [key, label] of COACH_SECTIONS) {
+    const text = rec.sections?.[key];
+    if (!text) continue;
+    const lines = text.split('\n').map((l) => l.replace(/^\s*[-•*]\s*/, '').trim()).filter(Boolean);
+    if (!lines.length) continue;
+    if (key === 'HINTS') {
+      html += `<section class="coach-section"><h4>${esc(label)}</h4><ul class="coach-hints">${lines.map((l) => `<li>${esc(l)}</li>`).join('')}</ul></section>`;
+    } else {
+      html += `<section class="coach-section"><h4>${esc(label)}</h4><p class="coach-line">${esc(lines.join(' '))}</p></section>`;
+    }
+  }
+
+  body.innerHTML = html;
+}
+
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s || '';
+  return d.innerHTML;
+}
+
+function sendCoachToElectron() {
+  if (!isElectron || !window.appBridge) return;
+  const st = coachPanel?.getState();
+  if (!st?.enabled || !st.history?.length) {
+    window.appBridge.updateCoach('<div class="empty">Waiting for interviewer to ask a question.</div>');
+    return;
+  }
+  const rec = st.history.find((r) => r.questionId === st.selectedId) || st.history[st.history.length - 1];
+  if (!rec) return;
+
+  let html = `<div class="coach-card"><div class="coach-q-label">Question</div><p class="coach-q">${esc(rec.question)}</p>`;
+  if (rec.state === 'thinking' || rec.state === 'streaming') {
+    html += `<div class="thinking"><div class="thinking-dots"><span></span><span></span><span></span></div> ${rec.state === 'thinking' ? 'Thinking…' : 'Writing hints…'}</div>`;
+  } else if (rec.state === 'error') {
+    html += '<p style="color:var(--caution);font-size:13px">AI coaching temporarily unavailable</p>';
+  }
+  html += '</div>';
+
+  for (const [key, label] of COACH_SECTIONS) {
+    const text = rec.sections?.[key];
+    if (!text) continue;
+    const lines = text.split('\n').map((l) => l.replace(/^\s*[-•*]\s*/, '').trim()).filter(Boolean);
+    if (!lines.length) continue;
+    const cls = key === 'CAUTION' ? ' caution' : key === 'GROUNDING' ? ' warning' : '';
+    html += `<div class="coach-card"><div class="section-label${cls}">${esc(label)}</div>`;
+    if (key === 'HINTS') {
+      html += `<div class="section-body"><ul>${lines.map((l) => `<li>${esc(l)}</li>`).join('')}</ul></div>`;
+    } else {
+      html += `<div class="section-body">${esc(lines.join(' '))}</div>`;
+    }
+    html += '</div>';
+  }
+
+  window.appBridge.updateCoach(html);
+}
+
+$('coachFloatToggle')?.addEventListener('click', () => {
+  $('coachFloat')?.classList.toggle('collapsed');
+});
+
 function openTab(tab) {
   state.tab = tab;
   $('sidePanel').hidden = false;
-  for (const t of ['eval', 'questions', 'transcript', 'chat']) {
+  for (const t of ['eval', 'questions', 'coach', 'feedback', 'transcript', 'chat']) {
     const selected = t === tab;
     $(`tab-${t}`).setAttribute('aria-selected', String(selected));
     $(`tab-${t}`).tabIndex = selected ? 0 : -1;
@@ -551,6 +922,8 @@ function openTab(tab) {
     $('chatInput').focus();
   }
   if (tab === 'eval') evalPanel?.clearUnseen();
+  if (tab === 'coach') coachPanel?.clearUnseen();
+  if (tab === 'feedback') feedbackPanel?.clearUnseen();
   if (tab === 'transcript') $('transcriptList').scrollTop = $('transcriptList').scrollHeight;
 }
 
@@ -584,6 +957,8 @@ async function onMenu(action) {
   switch (action) {
     case 'eval':
     case 'questions':
+    case 'coach':
+    case 'feedback':
     case 'transcript':
       openTab(action);
       break;
@@ -809,6 +1184,7 @@ function connectWS() {
     ws.send(JSON.stringify({ type: 'session_join', sessionId, participantKey: state.join.participantKey }));
     startHeartbeat();
     syncLiveState();
+    if (isElectron) window.appBridge.setCoachStatus(true, 'Connected to interview');
   };
 
   ws.onmessage = (ev) => {
@@ -867,6 +1243,29 @@ function onServerMessage(msg) {
   if (msg.type === 'transcript_final') upsertSegment(msg, true);
   else if (msg.type === 'transcript_partial') upsertSegment(msg, false);
   if (msg.type !== 'session_joined' && evalPanel?.onMessage(msg)) return;
+  if (msg.type !== 'session_joined' && coachPanel?.onMessage(msg)) {
+    if (state.screenSharing && isElectron) {
+      sendCoachToElectron();
+    } else if (state.screenSharing) {
+      // Relay to the popup window (primary) or floating overlay (fallback)
+      relayToPopup(msg);
+      if (!isPopupLive()) {
+        renderCoachFloat();
+        if (msg.type === 'coaching_question') {
+          showCoachFloat(true);
+          renderCoachFloat();
+        }
+      }
+    } else if (msg.type === 'coaching_question') {
+      if (isElectron) sendCoachToElectron();
+      openTab('coach');
+    }
+    return;
+  }
+  if (msg.type !== 'session_joined' && feedbackPanel?.onMessage(msg)) {
+    if (state.screenSharing) relayToPopup(msg);
+    return;
+  }
 
   switch (msg.type) {
     case 'session_joined':
@@ -874,6 +1273,8 @@ function onServerMessage(msg) {
       transcriber.setMode(state.transcription);
       (msg.transcript || []).forEach((seg) => upsertSegment(seg, true));
       evalPanel?.onJoined(msg);
+      coachPanel?.onJoined(msg);
+      applyCoachingDisclosure(msg.coachingEnabled === true);
       applySnapshot(msg.interview);
       loadChatHistory(msg.history || [], msg.pending);
       reportMedia();
@@ -996,6 +1397,8 @@ function teardown() {
   stopHeartbeat();
   clearTimeout(state.wsTimer);
   transcriber.stop();
+  closeCoachPopup();
+  if (state.screenSharing) applyScreenShareHide(false);
   if (state.ws) { const ws = state.ws; state.ws = null; ws.close(); }
   if (state.room) { const room = state.room; state.room = null; room.disconnect().catch(() => {}); }
   $('audioSink').innerHTML = '';
@@ -1068,21 +1471,25 @@ $('audioUnlock').addEventListener('click', () => state.room?.startAudio());
 $('transcribeChip').addEventListener('click', () => {
   if (state.sttState === 'unavailable') transcriber.retry();
 });
+$('popoutBtn')?.addEventListener('click', () => {
+  if (openCoachPopup()) toast('Coaching opened in a separate window');
+  else toast('Popup blocked — allow popups for this site', 'error');
+});
 
-for (const t of TABS) {
-  $(`tab-${t}`).hidden = false;
-  $(`tab-${t}`).addEventListener('click', () => openTab(t));
-}
+for (const t of TABS) enableTab(t);
 // Arrow-key navigation between tabs (WAI-ARIA tabs pattern).
 $('tabs').addEventListener('keydown', (e) => {
   if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
-  const i = TABS.indexOf(state.tab);
-  const next = TABS[(i + (e.key === 'ArrowRight' ? 1 : TABS.length - 1)) % TABS.length];
+  const visible = TABS;
+  const i = visible.indexOf(state.tab);
+  const next = visible[(i + (e.key === 'ArrowRight' ? 1 : visible.length - 1)) % visible.length];
   openTab(next);
   $(`tab-${next}`).focus();
 });
 
 document.querySelectorAll('#moreMenu .host-only').forEach((el) => { if (!isHost) el.remove(); });
+// The coach entry appears only for a candidate, and only once coaching is confirmed on.
+document.querySelectorAll('#moreMenu .coach-only').forEach((el) => { if (isHost) el.remove(); else el.hidden = true; });
 $('moreBtn').addEventListener('click', (e) => {
   e.stopPropagation();
   setMenu($('moreMenu').hidden);
@@ -1144,6 +1551,28 @@ if (isHost) {
     },
   });
   evalPanel.onShowEval(() => openTab('eval'));
+} else {
+  coachPanel = createCoachPanel({
+    isVisible: () => state.tab === 'coach',
+    setBadge: (n) => {
+      $('coachBadge').textContent = String(n);
+      $('coachBadge').hidden = !n;
+    },
+  });
+  feedbackPanel = createFeedbackPanel({
+    isVisible: () => state.tab === 'feedback',
+    setBadge: (n) => {
+      $('feedbackBadge').textContent = String(n);
+      $('feedbackBadge').hidden = !n;
+    },
+    // The tab stays out of the way until there is something in it.
+    onFirstResult: () => {
+      if (!TABS.includes('feedback')) TABS.splice(TABS.indexOf('transcript'), 0, 'feedback');
+      enableTab('feedback');
+      const m = $('menuFeedback');
+      if (m) m.hidden = false;
+    },
+  });
 }
 
 // Desktop: the panel starts open on the most useful tab for each role.

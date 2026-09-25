@@ -63,6 +63,8 @@
           <div class="tabs" role="tablist" id="tabs">
             <button role="tab" class="tab" data-tab="eval" id="tab-eval" aria-controls="pane-eval" hidden>AI Evaluation<span class="tab-badge" id="evalBadge" hidden></span></button>
             <button role="tab" class="tab" data-tab="questions" id="tab-questions" aria-controls="pane-questions" hidden>Questions</button>
+            <button role="tab" class="tab" data-tab="coach" id="tab-coach" aria-controls="pane-coach" hidden>AI Coach<span class="tab-badge" id="coachBadge" hidden></span></button>
+            <button role="tab" class="tab" data-tab="feedback" id="tab-feedback" aria-controls="pane-feedback" hidden>Answer Feedback<span class="tab-badge" id="feedbackBadge" hidden></span></button>
             <button role="tab" class="tab" data-tab="transcript" id="tab-transcript" aria-controls="pane-transcript">Transcript</button>
             <button role="tab" class="tab" data-tab="chat" id="tab-chat" aria-controls="pane-chat">Chat<span class="tab-badge" id="chatBadge" hidden></span></button>
           </div>
@@ -93,6 +95,25 @@
               <textarea id="generalNotes" rows="5" maxlength="4000" placeholder="Notes about the candidate (only you can see these)" aria-label="Private interview notes"></textarea>
               <div class="score-sub" id="notesStatus">Saved automatically.</div>
             </section>
+          </div>
+        </div>
+
+        <!-- Candidate only, and only when the interview enabled coaching -->
+        <div class="pane" role="tabpanel" id="pane-coach" aria-labelledby="tab-coach" hidden>
+          <div class="pane-scroll">
+            <div class="pane-note">
+              <span>Hints only · your interviewer knows this is on</span>
+              <button class="popout-btn" id="popoutBtn" title="Open in separate window (hidden during screen share)" aria-label="Pop out to separate window">&#x2197;</button>
+            </div>
+            <div id="coachBody"></div>
+          </div>
+        </div>
+
+        <!-- Candidate only, and only once an answer has been evaluated -->
+        <div class="pane" role="tabpanel" id="pane-feedback" aria-labelledby="tab-feedback" hidden>
+          <div class="pane-scroll">
+            <div class="pane-note">Feedback on your own answers · visible only to you</div>
+            <div id="feedbackBody"></div>
           </div>
         </div>
 
@@ -148,6 +169,8 @@
           <div class="menu" id="moreMenu" role="menu" hidden>
             <button role="menuitem" data-menu="eval" class="host-only">AI evaluation</button>
             <button role="menuitem" data-menu="questions" class="host-only">Questions &amp; notes</button>
+            <button role="menuitem" data-menu="coach" class="coach-only" id="menuCoach">AI coach</button>
+            <button role="menuitem" data-menu="feedback" class="coach-only" id="menuFeedback" hidden>Answer feedback</button>
             <button role="menuitem" data-menu="transcript">Transcript</button>
             <button role="menuitem" data-menu="pause" class="host-only" id="menuPause">Pause interview</button>
             <button role="menuitem" data-menu="resume" class="host-only" id="menuResume">Resume interview</button>
@@ -196,6 +219,16 @@
       <div class="dialog-actions"><button value="ok" class="host-btn">Close</button></div>
     </form>
   </dialog>
+
+  <!-- Floating coaching overlay — visible to candidate during screen share,
+       painted out of the outgoing stream by stream-filter.js -->
+  <div id="coachFloat" class="coach-float" hidden>
+    <div class="coach-float-header">
+      <span class="coach-float-title">AI Coach</span>
+      <button class="coach-float-toggle" id="coachFloatToggle" aria-label="Collapse coaching">&#x25BC;</button>
+    </div>
+    <div class="coach-float-body" id="coachFloatBody"></div>
+  </div>
 
   <button id="audioUnlock" class="audio-unlock" hidden>Click to enable audio</button>
   <div id="audioSink" hidden></div>

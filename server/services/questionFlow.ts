@@ -3,6 +3,7 @@ import { EvaluationError, type EvaluationService } from './evaluationService';
 import type { Difficulty, Evaluation, InterviewQuestion, Rubric, TranscriptSegment } from './evaluationTypes';
 import type { InterviewSession, ParticipantBinding, ParticipantRole, SessionManager } from './sessionManager';
 import type { PlannedQuestion } from './reportTypes';
+import type { CoachingService } from './coachingService';
 
 type Outbound = { type: string; sessionId?: string; [key: string]: unknown };
 
@@ -50,7 +51,10 @@ function cleanList(value: unknown, max = 10): string[] {
 const QUESTION_START = /^(what|why|how|when|where|which|who|whose|can you|could you|would you|will you|do you|did you|have you|is there|are there|is it|explain|describe|tell me|walk me|give me|compare|let's talk|how about|what about)\b/i;
 export function looksLikeQuestion(text: string): boolean {
   const t = text.trim();
-  return t.split(/\s+/).length >= 4 && (t.endsWith('?') || QUESTION_START.test(t));
+  const words = t.split(/\s+/).length;
+  // An explicit question mark is strong evidence, so short ones count too
+  // ("What is Python?"). Without one, require a longer interrogative opening.
+  return t.endsWith('?') ? words >= 3 : words >= 4 && QUESTION_START.test(t);
 }
 
 /** What the candidate may see about a question: never the rubric or evaluation. */
@@ -75,7 +79,9 @@ export class QuestionFlow {
     private readonly evaluator: EvaluationService,
     private readonly send: Senders,
     /** 'stream' when a speech-to-text provider is configured. */
-    private readonly transcriptionMode: () => 'stream' | 'unavailable'
+    private readonly transcriptionMode: () => 'stream' | 'unavailable',
+    /** Candidate coaching, when the feature is wired in. */
+    private readonly coaching?: CoachingService
   ) {
     setInterval(() => this.checkSilence(), 1000).unref();
   }
@@ -93,12 +99,15 @@ export class QuestionFlow {
         transcript: session.transcript.slice(-100),
         evaluator: this.evaluator.demoMode ? 'demo-heuristic' : 'llm',
         transcription: this.transcriptionMode(),
+        // The interviewer is told coaching is on, but never sees its content.
+        coachingEnabled: this.coaching?.enabledFor(session) ?? false,
       };
     }
     // The candidate is told whether the conversation is transcribed, never how it is scored.
     return {
       currentQuestion: current ? publicQuestion(current) : null,
       transcription: this.transcriptionMode(),
+      ...(this.coaching?.joinData(session) ?? { coachingEnabled: false }),
       // The shared transcript only: no question metadata, rubric or scores.
       transcript: session.transcript.slice(-100).map(({ id, speaker, text, timestamp }) => ({ id, speaker, text, timestamp })),
     };
@@ -391,17 +400,11 @@ export class QuestionFlow {
     }
   }
 
-  /** The interviewer asked something new while an answered question is still open. */
+  /** The interviewer asked something new while an answered question is still open — auto-end and start the new one. */
   private onSpokenQuestion(session: InterviewSession, open: InterviewQuestion, text: string): void {
-    if (session.settings.autoEndOnSilence) {
-      console.log(`[QUESTION] ${open.questionId} closed: interviewer asked a new question (auto-end on)`);
-      this.send.toRole(session.id, 'interviewer', { type: 'answer_auto_ended', sessionId: session.id, questionId: open.questionId, reason: 'new_question' });
-      this.startQuestion(session, text.slice(0, MAX_QUESTION_LENGTH), {});
-      return;
-    }
-    this.send.toRole(session.id, 'interviewer', {
-      type: 'new_question_detected', sessionId: session.id, openQuestionId: open.questionId, text: text.slice(0, MAX_QUESTION_LENGTH),
-    });
+    console.log(`[QUESTION] ${open.questionId} auto-closed: interviewer asked a new question`);
+    this.send.toRole(session.id, 'interviewer', { type: 'answer_auto_ended', sessionId: session.id, questionId: open.questionId, reason: 'new_question' });
+    this.startQuestion(session, text.slice(0, MAX_QUESTION_LENGTH), {});
   }
 
   /** Resolves once every evaluation running for the session has settled. */
@@ -479,8 +482,19 @@ export class QuestionFlow {
     });
 
     if (speaker === 'candidate') this.noteCandidateActivity(session.id, null);
-    if (speaker === 'interviewer' && current?.answerStartedAt && quality.source === 'stt' && looksLikeQuestion(text)) {
-      this.onSpokenQuestion(session, current, text);
+    if (speaker === 'interviewer' && quality.source === 'stt' && looksLikeQuestion(text)) {
+      if (current?.answerStartedAt) {
+        // A new question while the candidate is answering: auto-end and start the new one.
+        this.onSpokenQuestion(session, current, text);
+      } else if (!current) {
+        // No active question: auto-start tracking this spoken question.
+        this.startQuestion(session, text.slice(0, MAX_QUESTION_LENGTH), {});
+      }
+    }
+    // Candidate coaching, when the interview has it switched on. Only the
+    // interviewer's spoken words can trigger it, and only finals get this far.
+    if (speaker === 'interviewer' && quality.source === 'stt') {
+      this.coaching?.onInterviewerFinal(session, text, looksLikeQuestion);
     }
 
     if (speaker === 'candidate' && current) {
@@ -498,6 +512,7 @@ export class QuestionFlow {
 
   /** Called when the interview ends: the last answer still gets evaluated. */
   onInterviewEnded(session: InterviewSession): void {
+    this.coaching?.onInterviewEnded(session.id);
     const current = this.current(session);
     if (current) this.finishQuestion(session, current, 'interview_ended');
   }
@@ -546,10 +561,51 @@ export class QuestionFlow {
     this.rubricJobs.set(key, job);
   }
 
+  /**
+   * The candidate's own answer feedback. Only in practice interviews (the same
+   * opt-in flag as coaching), so an assessed interview still shows the candidate
+   * nothing. This is a separate, narrower payload than the interviewer's: no
+   * rubric, no expected answer, no override or note fields, no other question.
+   */
+  private sendCandidateFeedback(
+    session: InterviewSession,
+    q: InterviewQuestion,
+    opts: { state: 'evaluating' | 'ready' | 'error'; evaluation?: Evaluation }
+  ): void {
+    if (!session.settings.candidateCoaching) return;
+    const base = {
+      type: 'answer_evaluation',
+      sessionId: session.id,
+      questionId: q.questionId,
+      questionText: q.questionText,
+      state: opts.state,
+    };
+    if (opts.state !== 'ready' || !opts.evaluation) {
+      this.send.toRole(session.id, 'candidate', {
+        ...base,
+        ...(opts.state === 'error' ? { message: 'Answer evaluation unavailable.' } : {}),
+      });
+      return;
+    }
+    const e = opts.evaluation;
+    this.send.toRole(session.id, 'candidate', {
+      ...base,
+      answer: e.answerText,
+      score: e.score, // 0–100, exactly as the evaluator computed it
+      breakdown: e.breakdown,
+      strengths: e.strengths,
+      improvements: e.improvements,
+      missingConcepts: e.missingConcepts,
+      followUpQuestion: e.followUpQuestion,
+      evaluatedAt: e.evaluatedAt,
+    });
+  }
+
   private async runEvaluation(session: InterviewSession, q: InterviewQuestion, trigger: Evaluation['trigger'] = 'auto'): Promise<void> {
     q.status = 'evaluating';
     q.evaluationError = null;
     this.send.toRole(session.id, 'interviewer', { type: 'evaluation_started', sessionId: session.id, questionId: q.questionId });
+    this.sendCandidateFeedback(session, q, { state: 'evaluating' });
     console.log(`[AI] ${q.questionId} evaluation started`);
     const started = Date.now();
 
@@ -595,6 +651,7 @@ export class QuestionFlow {
         breakdown: evaluation.breakdown,
         question: q,
       });
+      this.sendCandidateFeedback(session, q, { state: 'ready', evaluation });
     } catch (err) {
       const code = err instanceof EvaluationError ? err.code : 'unknown';
       console.error(`[AI] ${q.questionId} evaluation failed (${code}, ${Date.now() - started}ms): ${(err as Error).message}`);
@@ -607,6 +664,7 @@ export class QuestionFlow {
         message: UNAVAILABLE,
         retryable: true,
       });
+      this.sendCandidateFeedback(session, q, { state: 'error' });
     }
   }
 

@@ -51,7 +51,9 @@ const fakeWhisper = http.createServer((req, res) => {
     res.end(JSON.stringify({
       text: whisperMode === 'question'
         ? 'Can you explain how virtual memory works?'
-        : 'A process is an executing program and threads in the same process share memory.',
+        : whisperMode === 'question2'
+          ? 'Why did you choose that particular architecture?'
+          : 'A process is an executing program and threads in the same process share memory.',
       segments: [{ start: 0, end: 5, avg_logprob: low ? -1.3 : -0.15, no_speech_prob: low ? 0.2 : 0.01 }],
     }));
   });
@@ -100,6 +102,8 @@ async function suite(name, file, ...args) {
   await suite('speech-to-text', 'stt.e2e.js', `http://127.0.0.1:${whisperPort}/control`);
   await suite('answer boundaries', 'boundaries.e2e.js', `http://127.0.0.1:${whisperPort}/control`);
   await suite('transcript correction', 'corrections.e2e.js', `http://127.0.0.1:${whisperPort}/control`);
+  await suite('candidate coaching', 'coaching.e2e.js', `http://127.0.0.1:${whisperPort}/control`);
+  await suite('candidate answer feedback', 'feedback.e2e.js', `http://127.0.0.1:${whisperPort}/control`);
   await suite('restore (before crash)', 'restore.e2e.js', 'before', state('restore'));
   await killServer();
 

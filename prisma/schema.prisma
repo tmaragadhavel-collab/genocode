@@ -15,6 +15,7 @@ model User {
   id           String        @id
   email        String        @unique
   name         String
+  role         String        @default("interviewer")
   passwordHash String
   salt         String
   createdAt    DateTime
@@ -48,6 +49,7 @@ model Interview {
   difficulty                String
   plannedQuestions          String // JSON PlannedQuestion[]
   candidateKey              String // capability in the candidate invite link
+  joinCode                  String    @default("") // short 6-char code for candidates to join
   settings                  String // JSON { autoEndOnSilence, silenceSeconds }
   review                    String // JSON InterviewerReview (human-controlled)
   reportStatus              String

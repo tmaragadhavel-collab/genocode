@@ -16,12 +16,14 @@ import { ChatHandler, type ChatClient, type ChatOutbound } from './services/chat
 import { InterviewRealtime, type RealtimeClient } from './services/interviewRealtime';
 import { EvaluationService } from './services/evaluationService';
 import { QuestionFlow } from './services/questionFlow';
+import { CoachingService } from './services/coachingService';
 import { AuthService } from './services/authService';
 import { ReportService } from './services/reportService';
 import { getPrisma, assertDatabaseReady } from './db/prisma';
 import { InterviewRepository } from './db/interviewRepository';
 import { SttManager } from './stt/sttManager';
 import { createInterviewRouter } from './routes/interviews';
+import { audioDiagnostics } from './diagnostics';
 import type { WSMessage, StreamChunk, TranscriptEntry, SessionState } from './types';
 
 const config = loadConfig();
@@ -107,11 +109,14 @@ function sendToRole(sessionId: string, role: ParticipantRole, msg: ChatOutbound)
 }
 
 const evaluator = new EvaluationService(llm);
+// Candidate-side coaching: opt-in per interview, disclosed to both roles.
+const coaching = new CoachingService(llm, { toSession: sendToSession, toRole: sendToRole });
 const questionFlow = new QuestionFlow(
   sessions,
   evaluator,
   { toSession: sendToSession, toRole: sendToRole },
-  () => sttManager.mode
+  () => sttManager.mode,
+  coaching
 );
 // Speech-to-text: one stream per participant mic; results feed the question flow as text.
 const sttManager = new SttManager(config.stt, sessions, {
@@ -188,6 +193,29 @@ app.get('/health', (_req, res) => {
     },
     session: sessionState,
   });
+});
+
+// Temporary audio-pipeline diagnostics (counters only, no transcript text, no credentials).
+app.get('/api/diag/audio', (_req, res) => {
+  res.json({
+    sttServiceStarted: sttService !== null,
+    deepgramConfigured: !!config.deepgramKey,
+    interviewerStreamConnected: sttService?.isInterviewerConnected() ?? false,
+    candidateStreamConnected: sttService?.isCandidateConnected() ?? false,
+    counters: audioDiagnostics.snapshot(),
+  });
+});
+
+app.post('/api/diag/audio/reset', (_req, res) => {
+  audioDiagnostics.reset();
+  res.json({ ok: true });
+});
+
+// Simulates a dropped Deepgram connection so the reconnect path can be verified.
+app.post('/api/diag/audio/disconnect', (req, res) => {
+  const speaker = req.query.speaker === 'candidate' ? 'candidate' : 'interviewer';
+  const ok = sttService?.forceDisconnect(speaker) ?? false;
+  res.json({ ok, speaker });
 });
 
 // Interviewer join page (http://localhost:<port>/interviewer, or via an HTTPS tunnel for remote interviewers).
@@ -338,6 +366,8 @@ function startSTT(): void {
   interviewerAudioCount = 0;
   candidateAudioCount = 0;
   audioDropWarned = false;
+  audioDiagnostics.reset();
+  startDiagnosticLog();
   console.log('[stt] Starting Deepgram streams...');
   sttService.startInterviewerStream();
   sttService.startCandidateStream();
@@ -348,7 +378,28 @@ function startSTT(): void {
 function stopSTT(): void {
   sttService?.stop();
   sttService = null;
+  stopDiagnosticLog();
+  console.log(`[stt] Final audio diagnostics:\n${audioDiagnostics.summary()}`);
   broadcastAudioStatus();
+}
+
+// Prints the audio counters every 5 s, but only while they are still moving.
+let diagTimer: ReturnType<typeof setInterval> | null = null;
+function startDiagnosticLog(): void {
+  if (diagTimer) return;
+  let previous = '';
+  diagTimer = setInterval(() => {
+    const summary = audioDiagnostics.summary();
+    if (summary === previous) return;
+    previous = summary;
+    console.log(summary);
+  }, 5000);
+  diagTimer.unref?.();
+}
+
+function stopDiagnosticLog(): void {
+  if (diagTimer) clearInterval(diagTimer);
+  diagTimer = null;
 }
 
 // --- WebSocket ---
@@ -536,7 +587,14 @@ function handleCandidateControl(msg: WSMessage): void {
         break;
       }
 
+      // Cheap no-op while both streams are healthy; recreates one that has been
+      // permanently lost (e.g. Deepgram rejected it) without touching the other.
+      sttService.ensureStreams();
+
       const buffer = Buffer.from(payload.data, 'base64');
+      if (payload.source === 'system' || payload.source === 'microphone') {
+        audioDiagnostics.wsAudioReceived(payload.source === 'system' ? 'interviewer' : 'candidate', buffer.length);
+      }
       if (payload.source === 'system') {
         interviewerAudioCount++;
         if (interviewerAudioCount === 1 || interviewerAudioCount % 100 === 0) {

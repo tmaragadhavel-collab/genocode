@@ -20,7 +20,7 @@ const WEB_DIR = path.join(process.cwd(), 'web');
 const LIVEKIT_CLIENT = path.join(process.cwd(), 'node_modules', 'livekit-client', 'dist', 'livekit-client.esm.mjs');
 const EMAIL_PATTERN = /^[^\s@]{1,64}@[^\s@]{1,190}\.[^\s@]{2,}$/;
 const QUESTION_ID = /^q_\d{3}_[0-9a-f]{6}$/;
-const ASSETS = new Set(['room.js', 'room.css', 'evaluation.js', 'stt.js', 'pcm-worklet.js', 'report.js', 'pages.css']);
+const ASSETS = new Set(['room.js', 'room.css', 'evaluation.js', 'coach.js', 'feedback.js', 'stt.js', 'pcm-worklet.js', 'report.js', 'pages.css', 'coach-popup.html', 'stream-filter.js', 'coach-overlay.html']);
 const DIFFICULTIES: Difficulty[] = ['easy', 'medium', 'hard'];
 const DECISIONS: Decision[] = ['undecided', 'strong_hire', 'hire', 'no_hire', 'strong_no_hire'];
 
@@ -107,6 +107,7 @@ export function createInterviewRouter({ config, sessions, auth, reports, questio
   router.get('/', (_req, res) => res.redirect('/dashboard'));
   router.get('/login', (_req, res) => res.sendFile(path.join(WEB_DIR, 'login.html')));
   router.get('/dashboard', (_req, res) => res.sendFile(path.join(WEB_DIR, 'dashboard.html')));
+  router.get('/candidate', (_req, res) => res.sendFile(path.join(WEB_DIR, 'candidate-dashboard.html')));
   router.get('/interview/new', (_req, res) => res.sendFile(path.join(WEB_DIR, 'new.html')));
 
   router.get('/interview/:sessionId/report', (req, res) => {
@@ -147,7 +148,7 @@ export function createInterviewRouter({ config, sessions, auth, reports, questio
       return;
     }
     try {
-      const user = await auth.signup(req.body?.email, req.body?.password, req.body?.name);
+      const user = await auth.signup(req.body?.email, req.body?.password, req.body?.name, req.body?.role);
       await auth.startSession(res, user);
       console.log(`[auth] Account created ${user.id}`);
       res.status(201).json({ user: auth.toPublic(user) });
@@ -190,6 +191,7 @@ export function createInterviewRouter({ config, sessions, auth, reports, questio
     res.json({
       interviews: sessions.listByOwner(user.id).map((s) => ({
         sessionId: s.id,
+        joinCode: s.joinCode,
         candidateName: s.details.candidateName,
         position: s.details.position,
         status: s.status,
@@ -202,6 +204,24 @@ export function createInterviewRouter({ config, sessions, auth, reports, questio
         averageScore: s.report?.averageFinalScore ?? null,
         decision: s.review.decision,
         interviewerUrl: interviewerUrl(req, s),
+        candidateUrl: candidateUrl(req, s),
+      })),
+    });
+  });
+
+  router.get('/api/candidate/interviews', auth.requireUser, (req, res) => {
+    const user = res.locals.user as User;
+    res.json({
+      interviews: sessions.listByCandidateEmail(user.email).map((s) => ({
+        sessionId: s.id,
+        joinCode: s.joinCode,
+        position: s.details.position,
+        interviewerName: s.details.interviewerName,
+        status: s.status,
+        createdAt: s.createdAt,
+        startedAt: s.startedAt,
+        endedAt: s.endedAt,
+        durationMinutes: s.details.durationMinutes,
         candidateUrl: candidateUrl(req, s),
       })),
     });
@@ -238,6 +258,9 @@ export function createInterviewRouter({ config, sessions, auth, reports, questio
     if (body.plannedQuestions !== undefined && (!Array.isArray(body.plannedQuestions) || body.plannedQuestions.length > 30)) {
       errors.push('plannedQuestions must be a list of at most 30 questions.');
     }
+    if (body.candidateCoaching !== undefined && typeof body.candidateCoaching !== 'boolean') {
+      errors.push('candidateCoaching must be true or false.');
+    }
     const skills = cleanList(body.skills, 10);
     const plannedQuestions: PlannedQuestion[] = [];
     for (const [i, raw] of (Array.isArray(body.plannedQuestions) ? body.plannedQuestions : []).entries()) {
@@ -271,13 +294,39 @@ export function createInterviewRouter({ config, sessions, auth, reports, questio
       skills,
       difficulty,
       plannedQuestions,
-    });
-    console.log(`[interview] ${user.id} created ${session.id} (${duration} min, ${plannedQuestions.length} planned)`);
+    }, { candidateCoaching: body.candidateCoaching === true });
+    console.log(`[interview] ${user.id} created ${session.id} (${duration} min, ${plannedQuestions.length} planned`
+      + `${session.settings.candidateCoaching ? ', candidate AI coaching ON' : ''})`);
 
     res.status(201).json({
       sessionId: session.id,
       status: session.status,
+      joinCode: session.joinCode,
       interviewerUrl: interviewerUrl(req, session),
+      candidateUrl: candidateUrl(req, session),
+    });
+  });
+
+  router.get('/api/interviews/lookup/:code', (req, res) => {
+    const code = (req.params.code || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (code.length !== 6) {
+      res.status(400).json({ error: 'Enter a 6-character interview code.' });
+      return;
+    }
+    const session = sessions.getByCode(code);
+    if (!session) {
+      res.status(404).json({ error: 'No interview found with that code. Check the code and try again.' });
+      return;
+    }
+    if (session.status === 'COMPLETED' || session.status === 'CANCELLED') {
+      res.status(410).json({ error: 'This interview has already ended.' });
+      return;
+    }
+    res.json({
+      sessionId: session.id,
+      position: session.details.position,
+      candidateName: session.details.candidateName,
+      status: session.status,
       candidateUrl: candidateUrl(req, session),
     });
   });

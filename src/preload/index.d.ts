@@ -7,6 +7,9 @@ declare global {
       setProtection: (enabled: boolean) => Promise<{ enabled: boolean }>;
       toggleAssistant: (visible: boolean) => Promise<{ visible: boolean }>;
       setTheme: (theme: 'light' | 'dark') => Promise<{ theme: 'light' | 'dark' }>;
+      updateCoach: (html: string) => Promise<{ ok: boolean }>;
+      clearCoach: () => Promise<{ ok: boolean }>;
+      setCoachStatus: (connected: boolean, text?: string) => Promise<{ ok: boolean }>;
       getServerPort: () => number;
     };
   }

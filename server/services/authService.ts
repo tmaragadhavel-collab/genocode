@@ -5,16 +5,19 @@ import type { PrismaClient } from '@prisma/client';
 
 const scrypt = promisify(scryptCb) as (pw: string, salt: string, len: number) => Promise<Buffer>;
 
+export type UserRole = 'interviewer' | 'candidate';
+
 export type User = {
   id: string;
   email: string;
   name: string;
+  role: UserRole;
   passwordHash: string; // scrypt, hex
   salt: string;
   createdAt: number;
 };
 
-export type PublicUser = { id: string; email: string; name: string };
+export type PublicUser = { id: string; email: string; name: string; role: UserRole };
 
 type AuthSession = { userId: string; expiresAt: number };
 
@@ -52,7 +55,7 @@ export class AuthService {
     const now = new Date();
     await this.prisma.authSession.deleteMany({ where: { expiresAt: { lt: now } } });
     for (const u of await this.prisma.user.findMany()) {
-      this.users.set(u.id, { ...u, createdAt: u.createdAt.getTime() });
+      this.users.set(u.id, { ...u, role: (u.role as UserRole) || 'interviewer', createdAt: u.createdAt.getTime() });
     }
     for (const s of await this.prisma.authSession.findMany()) {
       this.sessions.set(s.tokenHash, { userId: s.userId, expiresAt: s.expiresAt.getTime() });
@@ -60,17 +63,18 @@ export class AuthService {
   }
 
   toPublic(u: User): PublicUser {
-    return { id: u.id, email: u.email, name: u.name };
+    return { id: u.id, email: u.email, name: u.name, role: u.role };
   }
 
   getUser(id: string): User | undefined {
     return this.users.get(id);
   }
 
-  async signup(emailRaw: unknown, passwordRaw: unknown, nameRaw: unknown): Promise<User> {
+  async signup(emailRaw: unknown, passwordRaw: unknown, nameRaw: unknown, roleRaw?: unknown): Promise<User> {
     const email = typeof emailRaw === 'string' ? emailRaw.trim().toLowerCase() : '';
     const name = typeof nameRaw === 'string' ? nameRaw.replace(/[\u0000-\u001F\u007F]/g, '').trim() : '';
     const password = typeof passwordRaw === 'string' ? passwordRaw : '';
+    const role: UserRole = roleRaw === 'candidate' ? 'candidate' : 'interviewer';
     if (!EMAIL_PATTERN.test(email) || email.length > 254) throw new AuthError(400, 'Enter a valid email address.');
     if (!name || name.length > 80) throw new AuthError(400, 'Enter your name (max 80 characters).');
     if (password.length < 8 || password.length > 200) throw new AuthError(400, 'Password must be 8–200 characters.');
@@ -83,6 +87,7 @@ export class AuthService {
       id: `usr_${randomBytes(12).toString('base64url')}`,
       email,
       name,
+      role,
       passwordHash: hash.toString('hex'),
       salt,
       createdAt: Date.now(),

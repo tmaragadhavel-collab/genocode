@@ -90,14 +90,31 @@ export function sendWSMessage(type: string, payload: unknown): void {
 }
 
 let wsSendCount = { system: 0, microphone: 0 };
+let wsSendBytes = { system: 0, microphone: 0 };
+let wsDropCount = { system: 0, microphone: 0 };
 
 export function getWsSendCounts(): { system: number; microphone: number } {
   return { ...wsSendCount };
 }
 
+export function getWsAudioStats(): {
+  sent: { system: number; microphone: number };
+  bytes: { system: number; microphone: number };
+  dropped: { system: number; microphone: number };
+  readyState: number | null;
+} {
+  return {
+    sent: { ...wsSendCount },
+    bytes: { ...wsSendBytes },
+    dropped: { ...wsDropCount },
+    readyState: ws?.readyState ?? null,
+  };
+}
+
 export function sendAudioData(source: 'system' | 'microphone', data: ArrayBuffer): void {
   if (ws?.readyState !== WebSocket.OPEN) {
-    if (wsSendCount[source] === 0) {
+    wsDropCount[source]++;
+    if (wsDropCount[source] === 1) {
       console.warn(`[ws] Dropping ${source} audio — WebSocket not open (readyState=${ws?.readyState})`);
     }
     return;
@@ -111,6 +128,7 @@ export function sendAudioData(source: 'system' | 'microphone', data: ArrayBuffer
   const base64 = btoa(binary);
 
   wsSendCount[source]++;
+  wsSendBytes[source] += data.byteLength;
   if (wsSendCount[source] === 1 || wsSendCount[source] % 100 === 0) {
     console.log(`[ws] ${source} audio packets sent: ${wsSendCount[source]} (${base64.length} b64 chars)`);
   }

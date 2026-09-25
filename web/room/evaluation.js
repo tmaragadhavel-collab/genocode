@@ -151,37 +151,16 @@ export function createEvaluationPanel({ sendWS, toast, isVisible, setBadge }) {
       return;
     }
 
-    const form = h('form', { onsubmit: (e) => {
-      e.preventDefault();
-      const text = $('qText').value.trim();
-      const concepts = $('qConcepts').value.split(',').map((c) => c.trim()).filter(Boolean);
-      if (sendWS({ type: 'question_start', questionText: text, expectedConcepts: concepts, difficulty: $('qDifficulty').value })) {
-        $('qText').value = '';
-        $('qConcepts').value = '';
-      }
-    } },
-      h('h3', {}, 'Next question'),
-      st.live ? null : h('div', { className: 'eval-warn' }, 'Start or resume the interview to ask questions.'),
-      h('textarea', { id: 'qText', rows: '2', maxlength: '1000', placeholder: 'Type the question, or leave empty to use what you just asked aloud', 'aria-label': 'Question text' }),
-      st.lastHeard ? h('div', { className: 'heard' }, `Last heard from you: “${st.lastHeard}”`) : null,
-      h('details', {},
-        h('summary', {}, st.evaluator === 'llm' ? 'Rubric (optional — AI prepares one if empty)' : 'Rubric (demo scoring needs expected concepts)'),
-        h('input', { id: 'qConcepts', maxlength: '600', placeholder: 'Expected concepts, comma-separated', 'aria-label': 'Expected concepts' }),
-        h('div', { className: 'row' },
-          h('select', { id: 'qDifficulty', 'aria-label': 'Difficulty' },
-            h('option', { value: 'easy' }, 'Easy'), h('option', { value: 'medium', selected: true }, 'Medium'), h('option', { value: 'hard' }, 'Hard')))),
-      h('div', { className: 'btn-row' },
-        h('button', { className: 'host-btn primary', type: 'submit', disabled: !st.live }, 'Start question'),
-        st.planned.some((p) => !p.askedQuestionId) ? h('span', { className: 'score-sub' }, 'or pick a planned question in the Questions tab') : null),
+    const autoInfo = h('div', { className: 'auto-detect-info' },
+      h('h3', {}, 'Listening for questions'),
+      st.live ? null : h('div', { className: 'eval-warn' }, 'Start or resume the interview to begin.'),
+      st.live ? h('div', { className: 'score-sub' }, 'Questions are detected automatically from your speech. Ask a question aloud and the AI will track and evaluate the candidate\'s answer.') : null,
+      st.lastHeard ? h('div', { className: 'heard' }, `Last heard: “${st.lastHeard}”`) : null,
       h('div', { className: 'score-sub' }, sttSummary()),
+      st.planned.some((p) => !p.askedQuestionId) ? h('div', { className: 'score-sub' }, 'You also have planned questions in the Questions tab.') : null,
+      autoEndControl(),
     );
-    if (st.unlinked && st.live) {
-      box.append(h('div', { className: 'eval-warn', role: 'alert' },
-        'The candidate is answering, but no question is active, so this answer will not be scored. ',
-        st.lastHeard ? h('button', { type: 'button', className: 'linklike', onclick: () => sendWS({ type: 'question_start' }) },
-          `Use “${st.lastHeard.slice(0, 60)}${st.lastHeard.length > 60 ? '…' : ''}” as the question`) : 'Type the question above and start it.'));
-    }
-    box.append(form);
+    box.append(autoInfo);
   }
 
   function renderFollowUp() {
@@ -444,8 +423,6 @@ export function createEvaluationPanel({ sendWS, toast, isVisible, setBadge }) {
         if (!isVisible()) toast('Candidate seems done.', '', { label: 'End & Evaluate', run: () => sendWS({ type: 'question_end' }) });
         break;
       case 'new_question_detected':
-        st.boundary = { kind: 'newq', questionId: msg.openQuestionId, text: msg.text };
-        if (!isVisible()) toast('New question detected — end the previous answer?', '', { label: 'End & start', run: () => sendWS({ type: 'question_start', questionText: msg.text }) });
         break;
       case 'answer_auto_ended':
         toast(msg.reason === 'silence' ? 'Answer ended after silence (auto-end is on)' : 'Previous answer ended: new question asked');

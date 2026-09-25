@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Coach — Screen-share safe</title>
+<style>
+:root {
+  color-scheme: dark;
+  --bg: #111318;
+  --surface: #1c1f26;
+  --surface-2: #262a33;
+  --border: rgba(255,255,255,0.08);
+  --text: #eceef2;
+  --muted: #a3a9b5;
+  --accent: #8b93ff;
+  --accent-strong: #6b74f5;
+  --danger: #e5484d;
+  --warning: #f2a33a;
+  --success: #3ecf8e;
+  --radius: 12px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);font-size:14px;overflow:hidden;display:flex;flex-direction:column}
+button{font:inherit;color:inherit;cursor:pointer;background:none;border:none}
+[hidden]{display:none!important}
+
+/* Header */
+.header{background:var(--surface);border-bottom:1px solid var(--border);padding:8px 14px;display:flex;align-items:center;gap:8px;flex-shrink:0}
+.header .dot{width:8px;height:8px;border-radius:50%;background:var(--success);flex-shrink:0;animation:pulse 2s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+.header h1{font-size:13px;font-weight:600;flex:1}
+.header .badge{font-size:10px;padding:2px 7px;border-radius:10px;background:rgba(62,207,142,.15);color:var(--success);font-weight:600}
+
+/* Tabs */
+.tabs{display:flex;gap:0;background:var(--surface);border-bottom:1px solid var(--border);padding:0 14px;flex-shrink:0}
+.tab{padding:8px 14px;font-size:12px;font-weight:600;color:var(--muted);border-bottom:2px solid transparent;position:relative}
+.tab:hover{color:var(--text)}
+.tab.on{color:var(--text);border-bottom-color:var(--accent)}
+.tab .cnt{display:inline-flex;align-items:center;justify-content:center;min-width:14px;height:14px;padding:0 3px;margin-left:4px;border-radius:7px;background:var(--accent-strong);color:#fff;font-size:9px}
+
+/* Body */
+.body{flex:1;overflow-y:auto;padding:12px 14px 20px;display:flex;flex-direction:column;gap:10px}
+.empty{color:var(--muted);text-align:center;padding:30px 14px;line-height:1.6;font-size:13px}
+
+/* Shared */
+.card{background:var(--surface-2);border-radius:var(--radius);padding:12px;display:flex;flex-direction:column;gap:6px}
+.q-label{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);font-weight:700}
+.q{font-weight:600;line-height:1.4;margin:0}
+.status{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px;margin-top:2px}
+.status.error{color:var(--warning)}
+.spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .6s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* Coach sections */
+.section{background:var(--surface-2);border-radius:var(--radius);padding:12px}
+.section h4{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);font-weight:700;margin:0 0 6px}
+.hints{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:4px;list-style:disc}
+.hints li{line-height:1.45}
+.line{margin:0;line-height:1.45}
+
+/* Feedback */
+.overall{flex-direction:row;align-items:center;justify-content:space-between;display:flex}
+.score{display:flex;align-items:baseline;gap:4px}
+.score-value{font-size:28px;font-weight:700;line-height:1}
+.score-max{font-size:12px;color:var(--muted)}
+.dim{display:grid;grid-template-columns:90px 1fr 26px 28px;align-items:center;gap:6px;margin-bottom:4px}
+.dim-label{font-size:12px;color:var(--muted)}
+.bar{height:6px;border-radius:3px;background:rgba(255,255,255,.08);overflow:hidden}
+.bar-fill{display:block;height:100%;background:var(--accent);border-radius:3px}
+.dim-value{font-size:12px;text-align:right;font-variant-numeric:tabular-nums}
+.dim-weight{font-size:11px;color:var(--muted);text-align:right}
+.list{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:4px}
+.list li{line-height:1.45}
+
+/* History */
+.history{background:var(--surface-2);border-radius:var(--radius);padding:12px}
+.history h4{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);font-weight:700;margin:0 0 6px}
+.history ol{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:4px;list-style:decimal}
+.history button{background:none;border:none;color:var(--accent);cursor:pointer;font:inherit;font-size:13px;text-align:left;padding:0}
+.history button:hover,.history button.on{color:var(--text)}
+.flag{font-size:11px;color:var(--muted);margin-left:6px}
+
+/* Connection status */
+.disconnected{background:var(--danger);color:#fff;text-align:center;padding:6px;font-size:12px;font-weight:600;flex-shrink:0}
+</style>
+</head>
+<body>
+<div class="header">
+  <span class="dot" aria-hidden="true"></span>
+  <h1>AI Coach</h1>
+  <span class="badge">Screen-share safe</span>
+</div>
+<div class="tabs" id="tabs">
+  <button class="tab on" data-tab="coach" id="tabCoach">Coach</button>
+  <button class="tab" data-tab="feedback" id="tabFeedback" hidden>Feedback</button>
+</div>
+<div class="body" id="coachBody"></div>
+<div class="body" id="feedbackBody" hidden></div>
+<div class="disconnected" id="disconnected" hidden>Connection lost — return to the interview tab</div>
+
+<script>
+/* ---- State ---- */
+const SECTIONS = [['HINTS','Key points'],['STRUCTURE','Structure'],['GROUNDING','Draw on'],['CAUTION','Watch out']];
+const STATE_LABEL = {thinking:'Thinking…',streaming:'Writing hints…',complete:'',error:'AI coaching temporarily unavailable'};
+const DIMENSIONS = [['correctness','Correctness',40],['completeness','Completeness',25],['relevance','Relevance',15],['technicalDepth','Technical depth',10],['clarity','Clarity',10]];
+
+const coach = { history: [], selectedId: null };
+const fb = { order: [], byId: new Map(), selectedId: null };
+let activeTab = 'coach';
+
+const byId = (id) => coach.history.find(r => r.questionId === id);
+const current = () => byId(coach.selectedId) || coach.history[coach.history.length - 1] || null;
+const fbCurrent = () => fb.selectedId ? fb.byId.get(fb.selectedId) : null;
+
+/* ---- DOM helpers ---- */
+function h(tag, attrs = {}, ...children) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v === false || v == null) continue;
+    if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+    else if (k === 'className') el.className = v;
+    else el.setAttribute(k, v === true ? '' : v);
+  }
+  for (const c of children.flat()) { if (c != null && c !== false) el.append(c instanceof Node ? c : String(c)); }
+  return el;
+}
+const bullets = (text) => String(text||'').split('\n').map(l => l.replace(/^\s*[-•*]\s*/,'').trim()).filter(Boolean);
+const listOf = (title, items) => items?.length ? h('div',{className:'section'},h('h4',{},title),h('ul',{className:'list'},items.map(i=>h('li',{},i)))) : null;
+
+/* ---- Tab switching ---- */
+function switchTab(tab) {
+  activeTab = tab;
+  document.getElementById('tabCoach').className = tab === 'coach' ? 'tab on' : 'tab';
+  document.getElementById('tabFeedback').className = tab === 'feedback' ? 'tab on' : 'tab';
+  document.getElementById('coachBody').hidden = tab !== 'coach';
+  document.getElementById('feedbackBody').hidden = tab !== 'feedback';
+}
+document.getElementById('tabs').addEventListener('click', e => {
+  const t = e.target.closest('[data-tab]');
+  if (t) switchTab(t.dataset.tab);
+});
+
+/* ---- Coach renderer ---- */
+function renderCoach() {
+  const box = document.getElementById('coachBody');
+  box.textContent = '';
+  const rec = current();
+  if (!rec) { box.append(h('p',{className:'empty'},'When the interviewer asks a question, hints appear here.')); return; }
+
+  const status = STATE_LABEL[rec.state] || '';
+  box.append(h('div',{className:'card'},
+    h('div',{className:'q-label'},'Question'),
+    h('p',{className:'q'},rec.question),
+    status ? h('div',{className:`status${rec.state==='error'?' error':''}`},
+      rec.state==='thinking'||rec.state==='streaming' ? [h('span',{className:'spinner'}), ' ', status] : status) : null));
+  for (const [k,label] of SECTIONS) {
+    const items = bullets(rec.sections[k]);
+    if (!items.length) continue;
+    box.append(h('div',{className:'section'},h('h4',{},label),
+      k==='HINTS' ? h('ul',{className:'hints'},items.map(i=>h('li',{},i))) : h('p',{className:'line'},items.join(' '))));
+  }
+  if (coach.history.length > 1) {
+    box.append(h('div',{className:'history'},h('h4',{},'Earlier questions'),
+      h('ol',{},coach.history.slice(0,-1).reverse().map(r=>h('li',{},
+        h('button',{className:r.questionId===coach.selectedId?'on':'',
+          onclick:()=>{coach.selectedId=r.questionId;renderCoach();}},r.question))))));
+  }
+}
+
+/* ---- Feedback renderer ---- */
+function renderFeedback() {
+  const box = document.getElementById('feedbackBody');
+  box.textContent = '';
+  const rec = fbCurrent();
+  if (!rec) { box.append(h('p',{className:'empty'},'Answer feedback appears after you complete an answer.')); return; }
+
+  box.append(h('div',{className:'card'},h('div',{className:'q-label'},'Question'),h('p',{className:'q'},rec.questionText||'—')));
+
+  if (rec.state === 'evaluating') {
+    box.append(h('div',{className:'status'},h('span',{className:'spinner'}),' Evaluating your answer…'));
+  } else if (rec.state === 'error') {
+    box.append(h('div',{className:'status error'},rec.message||'Answer evaluation unavailable.'));
+  } else {
+    box.append(
+      h('div',{className:'card'},h('div',{className:'q-label'},'Your answer'),h('p',{style:'margin:0;line-height:1.45;color:var(--muted)'},rec.answer||'—')),
+      h('div',{className:'card overall'},h('div',{className:'q-label'},'Overall'),
+        h('div',{className:'score'},h('span',{className:'score-value'},String(rec.score)),h('span',{className:'score-max'},'/ 100'))));
+    if (rec.breakdown) {
+      const rows = DIMENSIONS.filter(([k])=>typeof rec.breakdown[k]==='number').map(([k,label,w])=>
+        h('div',{className:'dim'},h('span',{className:'dim-label'},label),
+          h('span',{className:'bar'},h('span',{className:'bar-fill',style:`width:${Math.max(0,Math.min(100,rec.breakdown[k]))}%`})),
+          h('span',{className:'dim-value'},`${rec.breakdown[k]}`),h('span',{className:'dim-weight'},`${w}%`)));
+      if (rows.length) box.append(h('div',{className:'section'},h('h4',{},'Breakdown'),...rows));
+    }
+    box.append(listOf('Strengths',rec.strengths),listOf('Improvements',rec.improvements),
+      listOf('Points you missed',rec.missingConcepts),
+      rec.followUpQuestion ? h('div',{className:'section'},h('h4',{},'Likely follow-up'),h('p',{className:'line'},rec.followUpQuestion)) : null);
+  }
+
+  if (fb.order.length > 1) {
+    box.append(h('div',{className:'history'},h('h4',{},'Your answers'),
+      h('ol',{},fb.order.map((id,i) => {
+        const r = fb.byId.get(id);
+        return h('li',{},h('button',{className:id===fb.selectedId?'on':'',
+          onclick:()=>{fb.selectedId=id;renderFeedback();}},`Q${i+1} · ${(r.questionText||'').slice(0,40)}`),
+          h('span',{className:'flag'},r.state==='ready'?'✓':r.state==='error'?'—':'…'));
+      }))));
+  }
+}
+
+/* ---- BroadcastChannel ---- */
+const channel = new BroadcastChannel('coach-popup');
+let alive = true;
+
+channel.onmessage = (e) => {
+  const d = e.data;
+  if (!d) return;
+
+  if (d.type === 'init') {
+    // Coach state
+    coach.history = d.coach?.history || [];
+    coach.selectedId = d.coach?.selectedId || null;
+    // Feedback state
+    fb.order = d.feedback?.order || [];
+    fb.byId = new Map((d.feedback?.entries || []).map(e => [e.questionId, e]));
+    fb.selectedId = d.feedback?.selectedId || null;
+    // Show feedback tab if there's data
+    document.getElementById('tabFeedback').hidden = fb.order.length === 0;
+    renderCoach();
+    renderFeedback();
+    return;
+  }
+
+  if (d.type === 'close') {
+    alive = false;
+    channel.close();
+    window.close();
+    return;
+  }
+
+  if (d.type === 'ping') {
+    channel.postMessage({ type: 'pong' });
+    return;
+  }
+
+  if (d.type !== 'relay') return;
+  const msg = d.msg;
+
+  switch (msg.type) {
+    case 'coaching_question':
+      coach.history.push({ questionId: msg.questionId, question: msg.question, detectedAt: Date.now(), state: 'thinking',
+        sections: {HINTS:'',STRUCTURE:'',GROUNDING:'',CAUTION:''}, error: null });
+      if (coach.history.length > 20) coach.history.shift();
+      coach.selectedId = msg.questionId;
+      renderCoach();
+      break;
+    case 'coaching_delta': {
+      const rec = byId(msg.questionId);
+      if (rec) { rec.sections[msg.section] = (rec.sections[msg.section]||'') + msg.text; renderCoach(); }
+      break;
+    }
+    case 'coaching_state': {
+      const rec = byId(msg.questionId);
+      if (rec) { rec.state = msg.state; rec.error = msg.error ?? null; renderCoach(); }
+      break;
+    }
+    case 'answer_evaluation': {
+      const prev = fb.byId.get(msg.questionId) || {};
+      fb.byId.set(msg.questionId, { ...prev, ...msg });
+      if (!fb.order.includes(msg.questionId)) fb.order.push(msg.questionId);
+      fb.selectedId = msg.questionId;
+      document.getElementById('tabFeedback').hidden = false;
+      renderFeedback();
+      if (activeTab === 'coach' && msg.state === 'ready') {
+        const cnt = document.getElementById('tabFeedback').querySelector('.cnt');
+        if (cnt) cnt.textContent = '!'; else {
+          const s = document.createElement('span'); s.className='cnt'; s.textContent='!';
+          document.getElementById('tabFeedback').appendChild(s);
+        }
+      }
+      break;
+    }
+  }
+};
+
+channel.postMessage({ type: 'popup_ready' });
+
+// Detect if main page closes the channel
+window.addEventListener('beforeunload', () => { if (alive) channel.postMessage({ type: 'popup_closed' }); });
+</script>
+</body>
+</html>
