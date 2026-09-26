@@ -462,6 +462,20 @@ wss.on('connection', (ws, req) => {
 
         case 'participant_status': {
           realtime.handleParticipantStatus(state, msg);
+          // A share that ended (or a reloaded page that never re-shared) must not leave coaching paused.
+          const b = state.binding;
+          const s = b?.role === 'candidate' && msg.screen !== true ? sessions.get(b.sessionId) : undefined;
+          if (s) coaching.setSuppressed(s, false, 'share_ended');
+          break;
+        }
+
+        // Candidate-only: pause coaching while their share surface would expose it.
+        case 'coaching_visibility': {
+          const binding = state.binding;
+          const session = binding ? sessions.get(binding.sessionId) : undefined;
+          if (session && binding?.role === 'candidate') {
+            coaching.setSuppressed(session, msg.hidden === true, typeof msg.reason === 'string' ? msg.reason.slice(0, 40) : '');
+          }
           break;
         }
 

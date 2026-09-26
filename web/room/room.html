@@ -51,6 +51,17 @@
             <div class="avatar avatar-lg" id="mainAvatar"></div>
             <p id="mainPlaceholderText">Waiting…</p>
           </div>
+          <div class="present-notice" id="presentNotice" hidden>
+            <div class="present-notice-icon" aria-hidden="true">
+              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+            </div>
+            <p class="present-notice-title">You're presenting to everyone</p>
+            <p class="present-notice-sub" id="presentNoticeSub">Others in the interview can see your screen.</p>
+            <div class="present-notice-actions">
+              <button class="present-btn" id="presentStopBtn" type="button">Stop presenting</button>
+              <button class="present-btn primary" id="presentTabBtn" type="button" hidden>Share a tab instead</button>
+            </div>
+          </div>
           <span class="tile-label" id="mainLabel"></span>
         </div>
       </main>

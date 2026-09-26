@@ -47,6 +47,7 @@ const state = {
   transcriptSeen: new Set(),
   screenSharing: false, // candidate is sharing their screen
   shareSurface: 'unknown', // 'browser' (tab), 'window', 'monitor' (entire screen)
+  coachPaused: false, // server-side coaching pause while the share surface would expose it
   streamFilter: null, // canvas-based stream processor (removes coaching from outgoing frames)
   rawScreenTrack: null, // original getDisplayMedia video track
 };
@@ -292,6 +293,7 @@ async function connectLiveKit(micOn, camOn) {
       if (pub.source === Track.Source.ScreenShare) {
         if (!state.streamFilter) detectShareSurface(room.localParticipant);
         applyScreenShareHide(true);
+        applyShareSurfacePolicy();
       }
       render(); reportMedia();
     })
@@ -361,7 +363,7 @@ async function setCam(on) {
   reportMedia();
 }
 
-async function setShare(on) {
+async function setShare(on, { preferCurrentTab = false } = {}) {
   const lp = state.room?.localParticipant;
   if (!lp) return;
   if (on && presenter() && presenter() !== lp) {
@@ -396,7 +398,7 @@ async function setShare(on) {
       await lp.setScreenShareEnabled(on, {
         audio: true,
         selfBrowserSurface: 'include',
-        preferCurrentTab: false,
+        preferCurrentTab,
       });
     } catch (err) {
       applyScreenShareHide(false);
@@ -541,12 +543,18 @@ function render() {
   // Main stage: a screen share wins, then the pinned person, then the other participant.
   const shareBy = presenter();
   const mainVideo = $('mainVideo');
+  const presentNotice = $('presentNotice');
   if (shareBy) {
     const me = shareBy === state.room.localParticipant;
-    setVideo(mainVideo, trackOf(shareBy, Track.Source.ScreenShare), { contain: true });
+    // Like Google Meet, the presenter never previews their own share: rendering
+    // it here while sharing this screen/window would capture itself endlessly.
+    setVideo(mainVideo, me ? null : trackOf(shareBy, Track.Source.ScreenShare), { contain: true });
     $('mainPlaceholder').hidden = true;
-    $('mainLabel').textContent = me ? 'You are presenting' : `${shareBy.name} is presenting`;
+    presentNotice.hidden = !me;
+    if (me) renderPresentNotice();
+    $('mainLabel').textContent = me ? '' : `${shareBy.name} is presenting`;
   } else {
+    presentNotice.hidden = true;
     const role = state.pinned || otherRole;
     const p = participantFor(role);
     const cam = trackOf(p, Track.Source.Camera);
@@ -709,9 +717,59 @@ function relayToPopup(msg) {
   try { popupChannel.postMessage({ type: 'relay', msg }); } catch {}
 }
 
+function renderPresentNotice() {
+  const sub = $('presentNoticeSub');
+  const tabBtn = $('presentTabBtn');
+  if (state.coachPaused) {
+    sub.textContent = "You're sharing your entire screen, so AI Coach is paused — it would be visible to the interviewer. Share this browser tab instead to keep coaching private.";
+    sub.classList.add('warn');
+    tabBtn.hidden = false;
+  } else {
+    sub.textContent = 'Others in the interview can see your screen.';
+    sub.classList.remove('warn');
+    tabBtn.hidden = true;
+  }
+}
+
+/**
+ * Runs once the browser tells us what the candidate picked in the share dialog.
+ * Tab and window shares leave the popup window outside the capture, so coaching
+ * stays private there. A whole-monitor share captures everything, including the
+ * popup — the only honest option in a browser is to pause coaching until the
+ * share ends or is switched to a tab.
+ */
+function applyShareSurfacePolicy() {
+  if (isHost || !coachPanel?.enabled || isElectron) return;
+  const monitor = state.shareSurface === 'monitor';
+  setCoachPausedForShare(monitor);
+}
+
+function setCoachPausedForShare(paused) {
+  if (state.coachPaused === paused) return;
+  state.coachPaused = paused;
+  sendWS({ type: 'coaching_visibility', hidden: paused, reason: paused ? 'monitor_share' : 'share_safe' });
+  if (paused) {
+    closeCoachPopup();
+    showCoachFloat(false);
+    toast('AI Coach paused while you share your entire screen', 'warn',
+      { label: 'Share a tab instead', run: reshareAsTab });
+  }
+  renderPresentNotice();
+}
+
+async function reshareAsTab() {
+  await setShare(false);
+  await setShare(true, { preferCurrentTab: true });
+}
+
 function autoShowCoachPopup() {
   const surface = state.shareSurface || 'unknown';
-  if (surface === 'monitor' || surface === 'window') {
+  if (surface === 'monitor') {
+    toast('AI Coach is paused while you share your entire screen', 'warn',
+      { label: 'Share a tab instead', run: reshareAsTab });
+    return;
+  }
+  if (surface === 'window') {
     openTab('coach');
     return;
   }
@@ -799,6 +857,7 @@ function applyScreenShareHide(sharing) {
     closeCoachPopup();
     showPopupPlaceholder(false);
     showCoachFloat(false);
+    setCoachPausedForShare(false);
     if (coachPanel?.enabled) toast('AI Coach restored to panel');
   }
 }
@@ -1244,7 +1303,9 @@ function onServerMessage(msg) {
   else if (msg.type === 'transcript_partial') upsertSegment(msg, false);
   if (msg.type !== 'session_joined' && evalPanel?.onMessage(msg)) return;
   if (msg.type !== 'session_joined' && coachPanel?.onMessage(msg)) {
-    if (state.screenSharing && isElectron) {
+    if (state.coachPaused) {
+      // Nothing may surface on-screen while a whole-monitor share is live.
+    } else if (state.screenSharing && isElectron) {
       sendCoachToElectron();
     } else if (state.screenSharing) {
       // Relay to the popup window (primary) or floating overlay (fallback)
@@ -1460,6 +1521,8 @@ $('joinBtn').addEventListener('click', enterRoom);
 $('micBtn').addEventListener('click', () => setMic(!localMedia().mic));
 $('camBtn').addEventListener('click', () => setCam(!localMedia().camera));
 $('shareBtn').addEventListener('click', () => setShare(!localMedia().screen));
+$('presentStopBtn').addEventListener('click', () => setShare(false));
+$('presentTabBtn').addEventListener('click', reshareAsTab);
 $('chatBtn').addEventListener('click', () => toggleTab('chat'));
 $('sideClose').addEventListener('click', closePanel);
 $('leaveBtn').addEventListener('click', leave);

@@ -59,6 +59,8 @@ export type WSMessageType =
   | 'participant_joined'
   | 'participant_left'
   | 'participant_status'
+  | 'coaching_visibility'
+  | 'coaching_paused'
   | 'ping'
   | 'pong'
   | 'question_start'

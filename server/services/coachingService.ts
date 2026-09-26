@@ -49,6 +49,8 @@ type SessionCoaching = {
   /** Interviewer finals waiting for the debounce window to close. */
   buffer: string[];
   timer: ReturnType<typeof setTimeout> | null;
+  /** Candidate's screen share would expose coaching (e.g. whole monitor). */
+  suppressed: boolean;
 };
 
 const SECTIONS: CoachingSection[] = ['HINTS', 'STRUCTURE', 'GROUNDING', 'CAUTION'];
@@ -147,6 +149,7 @@ export class CoachingService {
   onInterviewerFinal(session: InterviewSession, text: string, isQuestion: (t: string) => boolean): void {
     if (!this.enabledFor(session) || session.status !== 'LIVE') return;
     const state = this.state(session.id);
+    if (state.suppressed) return;
     state.buffer.push(text.trim());
     if (state.timer) clearTimeout(state.timer);
     state.timer = setTimeout(() => {
@@ -156,6 +159,29 @@ export class CoachingService {
       if (combined && isQuestion(combined)) this.startCoaching(session, combined);
     }, this.debounceMs);
     state.timer.unref?.();
+  }
+
+  /**
+   * The candidate's client reports whether its current screen share would put
+   * coaching on the shared surface (a whole-monitor share in a browser). While
+   * suppressed, no guidance is generated or sent — nothing exists to leak.
+   */
+  setSuppressed(session: InterviewSession, suppressed: boolean, reason: string): void {
+    if (!this.enabledFor(session)) return;
+    const state = this.state(session.id);
+    if (state.suppressed === suppressed) return;
+    state.suppressed = suppressed;
+    if (suppressed) {
+      if (state.timer) clearTimeout(state.timer);
+      state.timer = null;
+      state.buffer = [];
+      if (state.active) state.active.cancelled = true;
+      state.active = null;
+      // Let the same question be coached once the share is safe again.
+      state.lastQuestionId = null;
+    }
+    console.log(`[COACH] ${session.id} coaching ${suppressed ? 'paused' : 'resumed'}${reason ? ` (${reason})` : ''}`);
+    this.send.toRole(session.id, 'candidate', { type: 'coaching_paused', sessionId: session.id, paused: suppressed, reason });
   }
 
   onInterviewEnded(sessionId: string): void {
@@ -178,7 +204,7 @@ export class CoachingService {
   private state(sessionId: string): SessionCoaching {
     let s = this.bySession.get(sessionId);
     if (!s) {
-      s = { history: [], lastQuestionId: null, active: null, buffer: [], timer: null };
+      s = { history: [], lastQuestionId: null, active: null, buffer: [], timer: null, suppressed: false };
       this.bySession.set(sessionId, s);
     }
     return s;
@@ -186,6 +212,7 @@ export class CoachingService {
 
   private startCoaching(session: InterviewSession, question: string): void {
     const state = this.state(session.id);
+    if (state.suppressed) return;
     const questionId = questionIdOf(question);
     if (questionId === state.lastQuestionId) return; // the same question, asked again
     state.lastQuestionId = questionId;

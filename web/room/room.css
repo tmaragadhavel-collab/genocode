@@ -113,6 +113,26 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   font-size: 12px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .tile-label:empty { display: none; }
+.present-notice {
+  position: absolute; inset: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 8px; text-align: center; padding: 24px;
+  background: radial-gradient(ellipse at center, #1f2333 0%, #14161f 70%);
+}
+.present-notice-icon {
+  width: 60px; height: 60px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+  background: rgba(127, 212, 255, 0.12); color: var(--accent); margin-bottom: 6px;
+}
+.present-notice-title { margin: 0; font-size: 18px; font-weight: 600; }
+.present-notice-sub { margin: 0; font-size: 13px; color: var(--muted); max-width: 420px; line-height: 1.45; }
+.present-notice-sub.warn { color: var(--warning); }
+.present-notice-actions { display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap; justify-content: center; }
+.present-btn {
+  height: 36px; padding: 0 16px; border-radius: 18px; font-size: 13px; font-weight: 600;
+  background: var(--surface-2); color: var(--text); border: 1px solid var(--border); cursor: pointer;
+}
+.present-btn:hover { background: #343945; }
+.present-btn.primary { background: var(--accent-strong); border-color: transparent; color: #fff; }
+.present-btn.primary:hover { background: var(--accent); }
 .mic-off {
   position: absolute; right: 10px; top: 10px; width: 26px; height: 26px; border-radius: 50%;
   background: rgba(229, 72, 77, 0.9); display: flex; align-items: center; justify-content: center;
