@@ -52,6 +52,17 @@ export class AuthService {
 
   /** Loads accounts and unexpired login sessions from the database. */
   async init(): Promise<void> {
+    // Ensure the role column exists — Railway's SQLite migrations can silently
+    // fail, leaving the column missing even though _prisma_migrations says it
+    // was applied. This is a no-op when the column already exists.
+    try {
+      await this.prisma.$executeRawUnsafe(
+        "ALTER TABLE User ADD COLUMN role TEXT NOT NULL DEFAULT 'interviewer'"
+      );
+    } catch {
+      // Column already exists or table not yet created — both are fine.
+    }
+
     const now = new Date();
     await this.prisma.authSession.deleteMany({ where: { expiresAt: { lt: now } } });
     for (const u of await this.prisma.user.findMany()) {
