@@ -20,6 +20,19 @@ console.log(`[db] Database: ${path.relative(process.cwd(), file) || file}`);
 const env = { ...process.env, DATABASE_URL: url };
 const run = (cmd) => execSync(cmd, { stdio: 'inherit', env });
 
+// Ensure critical columns exist before Prisma touches the database.
+// SQLite table-rebuild migrations can silently fail on Railway but still
+// get recorded in _prisma_migrations, leaving the DB out of sync.
+if (fs.existsSync(file)) {
+  const patchSql = "ALTER TABLE User ADD COLUMN role TEXT NOT NULL DEFAULT 'interviewer';";
+  try {
+    execSync(`echo "${patchSql}" | npx prisma db execute --schema prisma/schema.prisma --stdin`, { env, stdio: 'pipe' });
+    console.log('[db] Patched: added User.role column.');
+  } catch {
+    // Silently ignore — column already exists or table not yet created.
+  }
+}
+
 // db push compares schema.prisma directly against the live database and applies
 // any missing columns/tables/indexes. It never consults _prisma_migrations.
 run('npx prisma db push --skip-generate --accept-data-loss');
